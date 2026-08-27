@@ -1,0 +1,174 @@
+"""FastAPI application: chat UI, corpus status, and a JSON API.
+
+Server-rendered with Jinja and HTMX. There is no build step and no Node dependency, which
+suits a project whose interesting parts are ingestion and verification rather than the
+front end.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from sqlalchemy.orm import Session
+
+from euaia.api import service
+from euaia.config import settings
+from euaia.db.session import SessionLocal
+from euaia.ingest.embedder import EmbeddingError
+from euaia.llm.groq_client import LLMError
+
+log = logging.getLogger(__name__)
+
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+app = FastAPI(title="EU AI Act Assistant", version="0.1.0")
+app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
+templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
+
+
+def get_session() -> Iterator[Session]:
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+# FastAPI's modern dependency style: keeps Depends() out of argument defaults.
+Db = Annotated[Session, Depends(get_session)]
+
+
+@app.get("/", response_class=HTMLResponse)
+def index(request: Request, session: Db):
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "sources": service.corpus_status(session),
+            "config_ok": bool(settings.groq_api_key and settings.google_api_key),
+            "examples": EXAMPLE_QUESTIONS,
+        },
+    )
+
+
+@app.post("/ask", response_class=HTMLResponse)
+def ask(
+    request: Request,
+    session: Db,
+    question: Annotated[str, Form()],
+):
+    """HTMX endpoint: returns the answer fragment."""
+    question = question.strip()
+    if not question:
+        return templates.TemplateResponse(
+            request=request, name="partials/error.html",
+            context={"message": "Please enter a question."},
+        )
+
+    try:
+        view = service.ask(question, session)
+    except (LLMError, EmbeddingError) as exc:
+        return templates.TemplateResponse(
+            request=request, name="partials/error.html", context={"message": str(exc)}
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Unhandled error answering question")
+        return templates.TemplateResponse(
+            request=request, name="partials/error.html",
+            context={"message": f"Unexpected error: {exc}"},
+        )
+
+    return templates.TemplateResponse(
+        request=request, name="partials/answer.html", context={"a": view}
+    )
+
+
+@app.post("/api/ask")
+def api_ask(payload: dict, session: Db):
+    """JSON API, used by the evaluation harness."""
+    question = (payload.get("question") or "").strip()
+    if not question:
+        return JSONResponse({"error": "question is required"}, status_code=400)
+
+    view = service.ask(question, session)
+    return {
+        "question": view.question,
+        "verdict": view.verdict,
+        "summary": view.summary,
+        "claims": [
+            {
+                "text": claim.text,
+                "citations": [
+                    {
+                        "citation": c.citation_label,
+                        "quote": c.quote,
+                        "url": c.deeplink,
+                        "version": c.version_label,
+                    }
+                    for c in claim.citations
+                ],
+            }
+            for claim in view.claims
+        ],
+        "criteria": [
+            {
+                "criterion": c["criterion"],
+                "status": c["status"],
+                "explanation": c["explanation"],
+                "citations": [
+                    {"citation": q.citation_label, "quote": q.quote, "url": q.deeplink}
+                    for q in c["citations"]
+                ],
+            }
+            for c in view.criteria
+        ],
+        "abstain_reason": view.abstain_reason,
+        "unanswered_aspects": view.unanswered_aspects,
+        "follow_up_questions": view.follow_up_questions,
+        "coverage": view.coverage,
+        "quotes_total": view.quotes_total,
+        "quotes_dropped": view.quotes_dropped,
+        "latency_ms": view.latency_ms,
+        "tokens": view.tokens,
+        "waited_ms": view.waited_ms,
+        "sources": view.sources,
+        "query_log_id": view.query_log_id,
+    }
+
+
+@app.get("/status", response_class=HTMLResponse)
+def status(request: Request, session: Db):
+    """Corpus status -- the seed of the admin dashboard."""
+    return templates.TemplateResponse(
+        request=request,
+        name="status.html",
+        context={"sources": service.corpus_status(session)},
+    )
+
+
+@app.get("/healthz")
+def healthz(session: Db):
+    sources = service.corpus_status(session)
+    return {
+        "ok": True,
+        "sources": len(sources),
+        "chunks": sum(s["chunks"] for s in sources),
+        "groq_key": bool(settings.groq_api_key),
+        "google_key": bool(settings.google_api_key),
+    }
+
+
+EXAMPLE_QUESTIONS = [
+    "Which AI practices are prohibited?",
+    "What requirements apply to high-risk AI systems?",
+    "What must an AI system tell users under Article 50?",
+    "What are the obligations of a deployer of a high-risk AI system?",
+    "Is my CV-screening tool a high-risk AI system?",
+]

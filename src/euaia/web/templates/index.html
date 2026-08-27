@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block content %}
+{% if not config_ok %}
+<div class="banner warn">
+  <strong>Not configured.</strong>
+  Set <code>GROQ_API_KEY</code> and <code>GOOGLE_API_KEY</code> in <code>.env</code>,
+  then ingest the corpus with
+  <code>uv run python -m euaia.ingest.pipeline</code>.
+</div>
+{% endif %}
+
+<section class="intro">
+  <h1>Ask about the EU AI Act</h1>
+  <p>
+    Every claim in an answer carries a quote checked character-for-character against
+    Regulation (EU) 2024/1689. Anything that cannot be verified is withheld rather than
+    shown, and the assistant abstains when the regulation does not answer the question.
+  </p>
+</section>
+
+<form class="ask" hx-post="/ask" hx-target="#answer" hx-indicator="#working"
+      hx-disabled-elt="button, textarea">
+  <textarea name="question" rows="3" placeholder="e.g. Which AI practices are prohibited?"
+            required></textarea>
+  <div class="ask-actions">
+    <button type="submit">Ask</button>
+    <span id="working" class="htmx-indicator">
+      Retrieving, reranking, generating, verifying&hellip;
+    </span>
+  </div>
+</form>
+
+<div class="examples">
+  {% for q in examples %}
+  <button type="button" class="chip"
+          onclick="document.querySelector('textarea[name=question]').value = this.textContent.trim()">
+    {{ q }}
+  </button>
+  {% endfor %}
+</div>
+
+<div id="answer"></div>
+
+<section class="corpus-mini">
+  <h2>Indexed corpus</h2>
+  <ul>
+    {% for s in sources %}
+    <li>
+      <strong>{{ s.title }}</strong>
+      <span class="muted">{{ s.version_label }}</span>
+      <span class="muted">&middot; {{ "{:,}".format(s.chunks) }} chunks</span>
+      {% if not s.embedded %}<span class="pill bad">not embedded</span>{% endif %}
+    </li>
+    {% else %}
+    <li class="muted">Nothing ingested yet.</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}

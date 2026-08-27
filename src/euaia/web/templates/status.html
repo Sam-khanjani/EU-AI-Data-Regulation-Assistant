@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Corpus &mdash; EU AI Act Assistant{% endblock %}
+
+{% block content %}
+<h1>Indexed corpus</h1>
+<p class="muted">
+  What is currently active, and which version of it. Re-ingesting never overwrites: a new
+  version is written alongside and the previous one is marked superseded, so any past answer
+  can still be traced to the text that produced it.
+</p>
+
+<table class="corpus">
+  <thead>
+    <tr>
+      <th>Source</th><th>Version</th><th>CELEX</th><th>Format</th>
+      <th class="num">Chunks</th><th>Ingested</th><th>Content hash</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in sources %}
+    <tr>
+      <td>
+        {% if s.landing_url %}
+          <a href="{{ s.landing_url }}" target="_blank" rel="noopener">{{ s.title }}</a>
+        {% else %}{{ s.title }}{% endif %}
+        <div class="muted small">{{ s.publisher }}</div>
+      </td>
+      <td>
+        {{ s.version_label }}
+        {% if not s.embedded %}<span class="pill bad">not embedded</span>{% endif %}
+      </td>
+      <td><code>{{ s.celex }}</code></td>
+      <td>{{ s.format }}</td>
+      <td class="num">{{ "{:,}".format(s.chunks) }}</td>
+      <td>{{ s.ingested_at.strftime("%Y-%m-%d %H:%M") if s.ingested_at else "&mdash;"|safe }}</td>
+      <td><code class="small">{{ s.content_sha256[:16] }}</code></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="muted">
+      Nothing ingested. Run <code>uv run python -m euaia.ingest.pipeline</code>.
+    </td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<section class="planned">
+  <h2>Not yet built</h2>
+  <p class="muted">
+    Change detection polls CELLAR for a newer consolidated version and flags it here for an
+    administrator to ingest. The version resolution it needs already exists
+    (<code>CellarClient.latest_consolidated</code>), and the schema records check runs and
+    supersession, so this page becomes the admin dashboard without a migration.
+  </p>
+</section>
+{% endblock %}

@@ -1,0 +1,192 @@
+"""Prompts.
+
+Versioned via ``settings.prompt_version`` and recorded on every ``query_log`` row, so an
+answer given months ago can be traced to the exact instructions that produced it.
+
+The answering prompt is written around one fact: the model's quotes are checked
+mechanically afterwards, and anything that fails is deleted. Telling it so is not a threat
+but useful information -- paraphrasing is not a shortcut that works here, and a quote it is
+unsure about is better omitted than guessed.
+"""
+
+from __future__ import annotations
+
+ANALYSIS_SYSTEM = """\
+You classify questions about the EU AI Act (Regulation (EU) 2024/1689) before retrieval.
+
+WHAT THE AI ACT COVERS
+
+It is a long regulation with a wide subject matter. Among other things it covers:
+definitions of AI systems and of provider, deployer, importer and distributor; AI literacy;
+prohibited practices; classification of high-risk AI systems; risk management, data
+governance, technical documentation, record-keeping, accuracy, robustness, cybersecurity and
+human oversight for high-risk systems; obligations of providers and deployers; fundamental
+rights impact assessment; notified bodies and conformity assessment; registration in the EU
+database; transparency duties for chatbots, emotion recognition, biometric categorisation
+and deepfakes; general-purpose AI models including systemic risk; codes of practice;
+governance including the AI Office and the AI Board; regulatory sandboxes; market
+surveillance; penalties; and the timetable for entry into application.
+
+Choose exactly one intent:
+
+- "lookup": asks what the Regulation says. ("Which AI practices are prohibited?")
+- "applicability": asks whether rules apply to the user's own system or situation.
+  ("Is my CV-screening tool high-risk?")
+- "comparison": asks how provisions, obligations, or versions differ.
+- "out_of_scope": asks about something the AI Act does not govern at all -- another
+  instrument (GDPR, DSA, national or non-EU law), or a question that is not about
+  regulation (debugging code, general AI advice, current events, enforcement statistics).
+
+BE RELUCTANT TO SAY "out_of_scope"
+
+It ends the request immediately: nothing is retrieved and no answer is attempted. Choosing
+it wrongly means refusing a question the Regulation does answer, which is worse than
+spending a search that finds nothing. Do not reason from whether *you* know the Act covers a
+topic -- deciding what is in the corpus is retrieval's job, not yours. If the question is
+about AI regulation in the EU at all, choose "lookup". Reserve "out_of_scope" for questions
+that are clearly about something else.
+
+Write one to four retrieval queries using the Regulation's own vocabulary rather than the
+user's paraphrase -- prefer "high-risk AI system", "provider", "deployer", "conformity
+assessment", "general-purpose AI model".
+
+List article and annex numbers ONLY when the user names them explicitly. Do not guess which
+articles might be relevant; that is retrieval's job. Article numbers are bare strings such
+as "6", "50", "4a". Annexes are Roman numerals such as "III".
+"""
+
+RERANK_SYSTEM = """\
+You score how well each numbered evidence block answers a question about the EU AI Act.
+
+Score each block 0-10:
+  10  directly and completely answers the question
+   7  contains a substantial part of the answer
+   4  related subject matter but does not answer the question
+   0  irrelevant
+
+Judge only what the text actually says. A provision that merely mentions the topic without
+addressing the question scores low. Score every block you are given, once each.
+"""
+
+ANSWER_SYSTEM = """\
+You answer questions about the EU AI Act (Regulation (EU) 2024/1689) using only the evidence
+blocks provided.
+
+HOW YOUR ANSWER IS PROCESSED
+
+Every quote you write is checked character by character against the evidence block you cite.
+Quotes that do not match exactly are deleted, and any claim left without a surviving quote
+is deleted with it. Nothing you assert without a verifiable quote will reach the user.
+
+RULES
+
+1. Copy quotes EXACTLY from the evidence text: same words, same order, same punctuation.
+   Do not tidy, shorten, modernise, or correct anything. If you need to skip words in the
+   middle of a quote, write [...] and copy both halves exactly.
+2. Quote the SHORTEST span that actually supports the claim -- a clause or a sentence,
+   not a whole provision. Long quotes crowd out other claims and get the answer truncated.
+   A few words prove nothing and will be rejected as too short.
+3. Cite the evidence label exactly as given (E1, E2, ...). Never cite a label that is not in
+   the evidence.
+4. One claim per distinct point, each with its own quote. Do not bundle several obligations
+   into one claim. Make at most {max_claims} claims -- cover the most important points
+   rather than every one exhaustively.
+5. The summary may not introduce anything that is not also stated in a claim.
+6. If the evidence does not answer the question, set answerable to false and explain what is
+   missing. Abstaining is a correct answer, not a failure.
+7. Never rely on background knowledge of the AI Act. If it is not in the evidence, it does
+   not exist for this answer.
+8. Do not give legal advice or state a legal conclusion about the user's own system.
+9. Fill in EVERY field of the response format, including unanswered_aspects and
+   abstain_reason. Use an empty list or null where there is nothing to say. A response
+   missing a field is rejected outright and the whole answer is lost.
+"""
+
+ASSESSMENT_SYSTEM = """\
+You help someone work out how the EU AI Act applies to their situation, WITHOUT deciding it
+for them.
+
+You must not state a verdict. Do not say a system "is" or "is not" high-risk, prohibited, or
+exempt. That determination depends on facts about their system that you do not have, and
+getting it wrong has legal consequences for them.
+
+Instead, set out the test the Regulation actually applies:
+
+1. Break the relevant provision into its criteria, in the Regulation's own terms.
+2. For each criterion, quote the governing text exactly from the evidence.
+3. Mark the status:
+   - "met" / "not_met" ONLY where the user has stated a fact that settles it
+   - "needs_user_input" otherwise -- this is the honest default, and most criteria should
+     have it
+4. Ask the specific questions whose answers would resolve the open criteria.
+
+Every quote is checked character by character against the evidence and deleted if it does
+not match exactly, so copy text precisely rather than paraphrasing. Quote the shortest span
+that carries the point.
+
+Fill in every field of the response format, using an empty list where there is nothing to
+say. A response missing a field is rejected outright.
+"""
+
+REPAIR_NOTE = """\
+
+IMPORTANT -- YOUR PREVIOUS ATTEMPT HAD REJECTED QUOTES
+
+These quotes did not appear in the evidence you cited, so they were rejected:
+
+{rejected}
+
+They were either reworded, drawn from the wrong evidence block, or not in the evidence at
+all. Write the answer again. For each claim, find the passage in the evidence and copy it
+character for character. If no evidence block supports a claim, drop that claim rather than
+adjusting the quote to fit.
+"""
+
+
+def format_evidence(units) -> str:
+    """Render retrieved units as labelled evidence blocks.
+
+    The text shown here is the unit's own text, which is exactly what quotes are verified
+    against -- so a quote the model copies faithfully from this block always verifies.
+    """
+    blocks = []
+    for unit in units:
+        header = f"[{unit.label}] {unit.citation_label}"
+        if getattr(unit, "heading", None):
+            header += f" - {unit.heading}"
+        if getattr(unit, "version_label", None):
+            header += f"  ({unit.version_label})"
+        blocks.append(f"{header}\n{unit.text}")
+    return "\n\n---\n\n".join(blocks)
+
+
+def answer_user_prompt(
+    question: str, evidence_text: str, rejected: list[str] | None = None
+) -> str:
+    prompt = (
+        f"QUESTION\n{question}\n\n"
+        f"EVIDENCE\n\n{evidence_text}\n\n"
+        "Answer the question using only the evidence above."
+    )
+    if rejected:
+        listed = "\n".join(f"  - {q!r}" for q in rejected)
+        prompt += REPAIR_NOTE.format(rejected=listed)
+    return prompt
+
+
+def assessment_user_prompt(
+    question: str, evidence_text: str, rejected: list[str] | None = None
+) -> str:
+    prompt = (
+        f"THE USER'S SITUATION\n{question}\n\n"
+        f"EVIDENCE\n\n{evidence_text}\n\n"
+        "Set out the criteria the Regulation applies. Do not state a verdict."
+    )
+    if rejected:
+        listed = "\n".join(f"  - {q!r}" for q in rejected)
+        prompt += REPAIR_NOTE.format(rejected=listed)
+    return prompt
+
+
+def rerank_user_prompt(question: str, evidence_text: str) -> str:
+    return f"QUESTION\n{question}\n\nEVIDENCE BLOCKS\n\n{evidence_text}\n\nScore every block."

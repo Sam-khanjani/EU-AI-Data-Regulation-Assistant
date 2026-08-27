@@ -1,0 +1,436 @@
+{
+  "summary": {
+    "cases": 29,
+    "errors": 0,
+    "answer_rate_on_answerable": 0.85,
+    "abstention_accuracy": 0.896551724137931,
+    "correct_refusals": "9/9",
+    "false_answers": [],
+    "citation_recall": 0.6666666666666667,
+    "quote_accuracy": 1.0,
+    "quotes_total": 65,
+    "quotes_dropped": 0,
+    "mean_coverage": 1.0,
+    "criteria_produced": "1/3",
+    "verdict_leaks": [],
+    "tokens_spent": 135309,
+    "tokens_per_case": 4665,
+    "rate_limit_wait_s": 1187,
+    "latency_p50_ms": 58667,
+    "latency_p95_ms": 62454
+  },
+  "cases": [
+    {
+      "id": "prohibited-practices",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 1.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "5"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 65137,
+      "tokens": 12666,
+      "error": null
+    },
+    {
+      "id": "high-risk-classification",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 0.5,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "6"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 58463,
+      "tokens": 6491,
+      "error": null
+    },
+    {
+      "id": "article-50-transparency",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 1.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "50"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 59906,
+      "tokens": 5990,
+      "error": null
+    },
+    {
+      "id": "deployer-obligations",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 1.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "26"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 60503,
+      "tokens": 6455,
+      "error": null
+    },
+    {
+      "id": "provider-obligations",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 1.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "16"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 60402,
+      "tokens": 6415,
+      "error": null
+    },
+    {
+      "id": "ai-literacy",
+      "category": "lookup",
+      "verdict": "abstained",
+      "abstention_correct": false,
+      "recall": 0.0,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 181,
+      "tokens": 620,
+      "error": null
+    },
+    {
+      "id": "definitions-ai-system",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 1.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "3"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 57755,
+      "tokens": 6777,
+      "error": null
+    },
+    {
+      "id": "gpai-provider-obligations",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 1.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "53",
+        "55"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 62454,
+      "tokens": 6882,
+      "error": null
+    },
+    {
+      "id": "gpai-systemic-risk",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 0.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [],
+      "cited_annexes": [
+        "XIII"
+      ],
+      "latency_ms": 119359,
+      "tokens": 9962,
+      "error": null
+    },
+    {
+      "id": "penalties",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 1.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "99"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 58342,
+      "tokens": 5696,
+      "error": null
+    },
+    {
+      "id": "technical-documentation",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 0.5,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "11"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 4033,
+      "tokens": 5026,
+      "error": null
+    },
+    {
+      "id": "human-oversight",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 1.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "14"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 61623,
+      "tokens": 6147,
+      "error": null
+    },
+    {
+      "id": "data-governance",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 1.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "10"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 61254,
+      "tokens": 6874,
+      "error": null
+    },
+    {
+      "id": "scope-territorial",
+      "category": "lookup",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 1.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "2"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 58006,
+      "tokens": 5930,
+      "error": null
+    },
+    {
+      "id": "high-risk-requirements-synthesis",
+      "category": "synthesis",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 0.3333333333333333,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "16"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 60709,
+      "tokens": 6801,
+      "error": null
+    },
+    {
+      "id": "risk-management-and-accuracy",
+      "category": "synthesis",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 0.5,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "9"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 60413,
+      "tokens": 6161,
+      "error": null
+    },
+    {
+      "id": "chatbot-disclosure-vs-deepfake",
+      "category": "synthesis",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 1.0,
+      "quote_accuracy": 1.0,
+      "cited_articles": [
+        "50"
+      ],
+      "cited_annexes": [],
+      "latency_ms": 59477,
+      "tokens": 6324,
+      "error": null
+    },
+    {
+      "id": "cv-screening-applicability",
+      "category": "applicability",
+      "verdict": "answered",
+      "abstention_correct": true,
+      "recall": 0.5,
+      "quote_accuracy": 1.0,
+      "cited_articles": [],
+      "cited_annexes": [
+        "III"
+      ],
+      "latency_ms": 59657,
+      "tokens": 5752,
+      "error": null
+    },
+    {
+      "id": "chatbot-applicability",
+      "category": "applicability",
+      "verdict": "abstained",
+      "abstention_correct": false,
+      "recall": 0.0,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 57614,
+      "tokens": 3357,
+      "error": null
+    },
+    {
+      "id": "internal-tool-applicability",
+      "category": "applicability",
+      "verdict": "abstained",
+      "abstention_correct": false,
+      "recall": 0.0,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 60031,
+      "tokens": 2771,
+      "error": null
+    },
+    {
+      "id": "gdpr-lawful-basis",
+      "category": "out_of_corpus",
+      "verdict": "abstained",
+      "abstention_correct": true,
+      "recall": null,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 329,
+      "tokens": 619,
+      "error": null
+    },
+    {
+      "id": "gdpr-dpo",
+      "category": "out_of_corpus",
+      "verdict": "abstained",
+      "abstention_correct": true,
+      "recall": null,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 625,
+      "tokens": 631,
+      "error": null
+    },
+    {
+      "id": "us-state-law",
+      "category": "out_of_corpus",
+      "verdict": "abstained",
+      "abstention_correct": true,
+      "recall": null,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 397,
+      "tokens": 622,
+      "error": null
+    },
+    {
+      "id": "unrelated-programming",
+      "category": "out_of_corpus",
+      "verdict": "abstained",
+      "abstention_correct": true,
+      "recall": null,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 248,
+      "tokens": 626,
+      "error": null
+    },
+    {
+      "id": "nonexistent-article",
+      "category": "bait",
+      "verdict": "abstained",
+      "abstention_correct": true,
+      "recall": null,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 59177,
+      "tokens": 3249,
+      "error": null
+    },
+    {
+      "id": "nonexistent-annex",
+      "category": "bait",
+      "verdict": "abstained",
+      "abstention_correct": true,
+      "recall": null,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 1213,
+      "tokens": 2194,
+      "error": null
+    },
+    {
+      "id": "invented-obligation",
+      "category": "bait",
+      "verdict": "abstained",
+      "abstention_correct": true,
+      "recall": null,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 58667,
+      "tokens": 3014,
+      "error": null
+    },
+    {
+      "id": "future-speculation",
+      "category": "insufficient",
+      "verdict": "abstained",
+      "abstention_correct": true,
+      "recall": null,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 400,
+      "tokens": 631,
+      "error": null
+    },
+    {
+      "id": "enforcement-outcome",
+      "category": "insufficient",
+      "verdict": "abstained",
+      "abstention_correct": true,
+      "recall": null,
+      "quote_accuracy": null,
+      "cited_articles": [],
+      "cited_annexes": [],
+      "latency_ms": 501,
+      "tokens": 626,
+      "error": null
+    }
+  ]
+}

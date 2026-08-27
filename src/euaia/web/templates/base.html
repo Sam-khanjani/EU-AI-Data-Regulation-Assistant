@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}EU AI Act Assistant{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@2.0.3"></script>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header>
+    <div class="wrap header-inner">
+      <a class="brand" href="/">
+        <strong>EU AI Act Assistant</strong>
+        <span class="tag">verified citations</span>
+      </a>
+      <nav>
+        <a href="/">Ask</a>
+        <a href="/status">Corpus</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="wrap">
+    <p>
+      Answers are generated from official EUR-Lex text and every quote is checked against
+      the source. This is an information tool, not legal advice.
+    </p>
+  </footer>
+</body>
+</html>

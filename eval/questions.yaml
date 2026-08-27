@@ -1,0 +1,215 @@
+# Evaluation set for the EU AI Act assistant.
+#
+# Roughly a third of these are cases the system is supposed to REFUSE. That ratio is
+# deliberate: a RAG system evaluated only on questions it can answer will look excellent
+# right up until someone asks it something outside its corpus. Abstention is a measured
+# outcome here, not a fallback.
+#
+# Fields:
+#   id                 stable identifier
+#   category           lookup | synthesis | applicability | out_of_corpus | insufficient | bait
+#   question           what is asked
+#   expected_articles  article numbers that should be retrieved (recall target)
+#   expected_annexes   annex numbers that should be retrieved
+#   should_abstain     true if answering at all is a failure
+#   expect_criteria    true if the answer must be a criteria checklist, not a verdict
+#   notes              why this case is here
+
+- id: prohibited-practices
+  category: lookup
+  question: Which AI practices are prohibited?
+  expected_articles: ["5"]
+  should_abstain: false
+  notes: The most basic lookup. If this fails, nothing else matters.
+
+- id: high-risk-classification
+  category: lookup
+  question: How is an AI system classified as high-risk?
+  expected_articles: ["6"]
+  expected_annexes: ["III"]
+  should_abstain: false
+  notes: Article 6 and Annex III are inseparable; retrieval should surface both.
+
+- id: article-50-transparency
+  category: lookup
+  question: What does Article 50 require?
+  expected_articles: ["50"]
+  should_abstain: false
+  notes: Names a provision outright - the structural retrieval leg must win here.
+
+- id: deployer-obligations
+  category: lookup
+  question: What are the obligations of a deployer of a high-risk AI system?
+  expected_articles: ["26"]
+  should_abstain: false
+  notes: Tests the provider/deployer distinction, a common confusion.
+
+- id: provider-obligations
+  category: lookup
+  question: What obligations does a provider of a high-risk AI system have?
+  expected_articles: ["16"]
+  should_abstain: false
+
+- id: ai-literacy
+  category: lookup
+  question: What does the AI Act say about AI literacy?
+  expected_articles: ["4"]
+  should_abstain: false
+
+- id: definitions-ai-system
+  category: lookup
+  question: How does the Regulation define an AI system?
+  expected_articles: ["3"]
+  should_abstain: false
+
+- id: gpai-provider-obligations
+  category: lookup
+  question: What are the obligations of providers of general-purpose AI models?
+  expected_articles: ["53"]
+  should_abstain: false
+
+- id: gpai-systemic-risk
+  category: lookup
+  question: When is a general-purpose AI model considered to have systemic risk?
+  expected_articles: ["51"]
+  should_abstain: false
+
+- id: penalties
+  category: lookup
+  question: What are the maximum fines for breaching the prohibitions in the AI Act?
+  expected_articles: ["99"]
+  should_abstain: false
+
+- id: technical-documentation
+  category: lookup
+  question: What technical documentation is required for a high-risk AI system?
+  expected_articles: ["11"]
+  expected_annexes: ["IV"]
+  should_abstain: false
+
+- id: human-oversight
+  category: lookup
+  question: What are the human oversight requirements for high-risk AI systems?
+  expected_articles: ["14"]
+  should_abstain: false
+
+- id: data-governance
+  category: lookup
+  question: What data governance requirements apply to high-risk AI systems?
+  expected_articles: ["10"]
+  should_abstain: false
+
+- id: scope-territorial
+  category: lookup
+  question: Does the AI Act apply to providers established outside the EU?
+  expected_articles: ["2"]
+  should_abstain: false
+
+- id: high-risk-requirements-synthesis
+  category: synthesis
+  question: What must a provider do before placing a high-risk AI system on the market?
+  expected_articles: ["16", "43", "49"]
+  should_abstain: false
+  notes: Requires combining several provisions; tests multi-article retrieval.
+
+- id: risk-management-and-accuracy
+  category: synthesis
+  question: What are the requirements for risk management and accuracy of high-risk AI systems?
+  expected_articles: ["9", "15"]
+  should_abstain: false
+
+- id: chatbot-disclosure-vs-deepfake
+  category: synthesis
+  question: How do the transparency rules differ between chatbots and deepfakes?
+  expected_articles: ["50"]
+  should_abstain: false
+
+# --- applicability: must produce a criteria checklist, never a verdict ---
+
+- id: cv-screening-applicability
+  category: applicability
+  question: >-
+    I built a tool that screens CVs and ranks job candidates for our HR team.
+    Is it a high-risk AI system?
+  expected_articles: ["6"]
+  expected_annexes: ["III"]
+  should_abstain: false
+  expect_criteria: true
+  notes: Annex III point 4 covers employment. Must lay out criteria, not decide.
+
+- id: chatbot-applicability
+  category: applicability
+  question: >-
+    We run a customer support chatbot on our website. What obligations do we have?
+  expected_articles: ["50"]
+  should_abstain: false
+  expect_criteria: true
+
+- id: internal-tool-applicability
+  category: applicability
+  question: >-
+    Our AI only runs internally and never leaves the company. Does the AI Act still apply?
+  expected_articles: ["2"]
+  should_abstain: false
+  expect_criteria: true
+
+# --- must refuse ---
+
+- id: gdpr-lawful-basis
+  category: out_of_corpus
+  question: What is the lawful basis for processing personal data under the GDPR?
+  should_abstain: true
+  notes: GDPR is not in the corpus. Answering from AI Act text would be wrong.
+
+- id: gdpr-dpo
+  category: out_of_corpus
+  question: When must an organisation appoint a Data Protection Officer?
+  should_abstain: true
+  notes: GDPR Article 37. The AI Act says nothing about this.
+
+- id: us-state-law
+  category: out_of_corpus
+  question: What does the Colorado AI Act require of developers?
+  should_abstain: true
+  notes: Wrong jurisdiction entirely.
+
+- id: unrelated-programming
+  category: out_of_corpus
+  question: How do I fix a segmentation fault in my C++ program?
+  should_abstain: true
+  notes: Not a regulatory question at all.
+
+- id: nonexistent-article
+  category: bait
+  question: What does Article 99a of the AI Act require?
+  should_abstain: true
+  notes: >-
+    There is no Article 99a. A system that invents one has failed the central test.
+    Retrieval will return something (Article 99 is lexically close), so this checks the
+    verification and abstention path, not just retrieval.
+
+- id: nonexistent-annex
+  category: bait
+  question: What is listed in Annex XX of the AI Act?
+  should_abstain: true
+  notes: Annexes run to XIV in the consolidated text.
+
+- id: invented-obligation
+  category: bait
+  question: >-
+    Which article requires AI providers to pay an annual registration fee of EUR 10,000
+    to the AI Office?
+  should_abstain: true
+  notes: No such obligation exists. Tests resistance to a confidently-framed false premise.
+
+- id: future-speculation
+  category: insufficient
+  question: What will the AI Act require in 2030 after the next planned revision?
+  should_abstain: true
+  notes: Not answerable from the text; invites speculation.
+
+- id: enforcement-outcome
+  category: insufficient
+  question: How many companies have been fined under the AI Act so far?
+  should_abstain: true
+  notes: A factual question about the world, not about the Regulation's text.

@@ -1,0 +1,113 @@
+{# Rendered answer. The verification panel is the point of the interface, not a footnote. #}
+
+<article class="answer">
+  {% if a.verdict == "abstained" %}
+    <div class="verdict abstain">
+      <h2>No answer given</h2>
+      <p>{{ a.abstain_reason }}</p>
+      {% if a.claims_dropped %}
+      <p class="muted">
+        A draft answer was produced, but {{ a.claims_dropped }} of its statements could not
+        be verified against the regulation text and were discarded.
+      </p>
+      {% endif %}
+    </div>
+
+  {% else %}
+    <div class="verdict {{ 'partial' if a.verdict == 'partial' else 'ok' }}">
+      {% if a.verdict == "partial" %}
+        <h2>Partial answer</h2>
+        <p class="muted">
+          Some of the draft could not be verified and was withheld. What follows is only the
+          part supported by the regulation text.
+        </p>
+      {% else %}
+        <h2>Answer</h2>
+      {% endif %}
+    </div>
+
+    {% if a.summary %}<p class="summary">{{ a.summary }}</p>{% endif %}
+
+    {% if a.intent == "applicability" and a.criteria %}
+      <div class="notice">
+        This sets out the test the Regulation applies. It does not decide whether your
+        system falls under it &mdash; that depends on facts only you have.
+      </div>
+      <ol class="criteria">
+        {% for c in a.criteria %}
+        <li>
+          <div class="criterion-head">
+            <span class="status {{ c.status }}">
+              {% if c.status == 'met' %}Met
+              {% elif c.status == 'not_met' %}Not met
+              {% else %}Needs your input{% endif %}
+            </span>
+            <strong>{{ c.criterion }}</strong>
+          </div>
+          {% if c.explanation %}<p>{{ c.explanation }}</p>{% endif %}
+          {% for cite in c.citations %}{% include "partials/citation.html" %}{% endfor %}
+        </li>
+        {% endfor %}
+      </ol>
+
+    {% else %}
+      <ol class="claims">
+        {% for claim in a.claims %}
+        <li>
+          <p>{{ claim.text }}</p>
+          {% for cite in claim.citations %}{% include "partials/citation.html" %}{% endfor %}
+        </li>
+        {% endfor %}
+      </ol>
+    {% endif %}
+
+    {% if a.follow_up_questions %}
+    <section class="followups">
+      <h3>To take this further, you would need to answer</h3>
+      <ul>{% for q in a.follow_up_questions %}<li>{{ q }}</li>{% endfor %}</ul>
+    </section>
+    {% endif %}
+
+    {% if a.unanswered_aspects %}
+    <section class="gaps">
+      <h3>Not covered by the retrieved provisions</h3>
+      <ul>{% for u in a.unanswered_aspects %}<li>{{ u }}</li>{% endfor %}</ul>
+    </section>
+    {% endif %}
+  {% endif %}
+
+  <details class="verification" {% if a.quotes_dropped %}open{% endif %}>
+    <summary>
+      Verification
+      <span class="muted">
+        {{ a.quotes_total - a.quotes_dropped }}/{{ a.quotes_total }} quotes verified
+        {%- if a.quotes_dropped %}, {{ a.quotes_dropped }} rejected{% endif %}
+      </span>
+    </summary>
+    <dl>
+      <dt>Quotes checked against source</dt>
+      <dd>{{ a.quotes_total }}</dd>
+      <dt>Rejected as unverifiable</dt>
+      <dd>{{ a.quotes_dropped }}</dd>
+      <dt>Statements discarded for lack of support</dt>
+      <dd>{{ a.claims_dropped }}</dd>
+      <dt>Claim coverage</dt>
+      <dd>{{ "%.0f%%"|format(a.coverage * 100) }}</dd>
+      <dt>Document versions read</dt>
+      <dd>
+        {% for s in a.sources %}{{ s.version_label }}{% if not loop.last %}; {% endif %}{% else %}
+        &mdash;{% endfor %}
+      </dd>
+      <dt>Latency</dt>
+      <dd>{{ "{:,}".format(a.latency_ms) }} ms &middot; {{ "{:,}".format(a.tokens) }} tokens</dd>
+      {% if a.query_log_id %}
+      <dt>Audit record</dt><dd>query_log #{{ a.query_log_id }}</dd>
+      {% endif %}
+    </dl>
+    <ol class="steps">
+      {% for p in a.progress %}
+      <li><code>{{ p.step }}</code> {{ p.detail }}</li>
+      {% endfor %}
+    </ol>
+  </details>
+</article>
