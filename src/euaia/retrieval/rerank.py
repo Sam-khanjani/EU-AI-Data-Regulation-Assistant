@@ -5,16 +5,34 @@ trades that back for precision, because everything surviving here is spent as co
 answer call, and irrelevant provisions do measurable harm: they give the model plausible
 text to quote in support of the wrong claim.
 
-**Reranking scores chunks, not articles.** A paragraph chunk averages ~99 tokens; the
-article it belongs to averages 530 and reaches 3,369. Scoring twenty expanded articles would
-be a ~16,000-token request against a free-tier ceiling of 8,000 tokens per minute, so it
-would simply fail. It is also the wrong unit to score: relevance is a property of the passage
-that matched, not of everything else in the same article. Expansion happens afterwards, to
-the survivors only.
+**Reranking scores chunks, not articles.** A packed chunk targets ~500 tokens; the article
+it belongs to averages 530 and reaches 3,369. Scoring twenty expanded articles would be a
+~16,000-token request against a free-tier ceiling of 8,000 tokens per minute, so it would
+simply fail. It is also the wrong unit to score: relevance is a property of the passage that
+matched, not of everything else in the same article. Expansion happens afterwards, to the
+survivors only.
+
+``settings.rerank_token_budget`` bounds how many of ``retrieve_candidates`` actually reach
+this call -- ``_budgeted`` below walks the fused candidate list in rank order and stops once
+the budget is spent, so anything past that cutoff is silently unscored. That budget has to be
+kept in step with real chunk size by hand; it fell out of sync once already when a chunk-
+packing rewrite roughly quadrupled average chunk size, and the reranker was left seeing only
+the top ~6 of 20 candidates instead of most of them.
 
 Uses the smaller ``gpt-oss-20b`` under the same strict-schema discipline as everything else.
 Scores are advisory -- the sufficiency gate downstream decides whether the best of them is
 good enough to answer from at all.
+
+**Known limitation, still open.** For questions phrased around a real-world scenario rather
+than legal terms -- "our customer support chatbot" rather than "AI systems intended to
+interact with natural persons" (Article 50's actual wording) -- the model has been observed
+scoring *every* candidate 0/10, including provisions plainly on topic. Raising
+``reasoning_effort`` from "low" to "medium" was tried and measured against the live model: it
+did not change the outcome, so it was reverted (see the call below) rather than paying more
+tokens and latency for no benefit. The schema itself carries no bias toward 0 (checked). This
+looks like a genuine judgement gap in the small model on this question shape, not a mechanical
+bug -- fixing it likely means rewriting ``RERANK_SYSTEM`` to explicitly ask for scenario-to-
+concept matching, or reranking with the larger model, both unverified as of this writing.
 """
 
 from __future__ import annotations
@@ -29,6 +47,13 @@ from euaia.llm.schemas import RERANK_SCHEMA
 from euaia.retrieval.hybrid import Candidate, RetrievedUnit
 
 log = logging.getLogger(__name__)
+
+# "medium" reasoning effort (see the rerank() call below) spends real completion tokens on
+# hidden deliberation before it emits the scored JSON -- 1024 was enough at "low" but left
+# zero room for that at "medium" and the call failed with json_validate_failed on an empty
+# generation. Referenced by tests/test_budgets.py::test_rerank_call_fits too, so the two
+# cannot drift apart the way rerank_token_budget and real chunk size once did.
+RERANK_MAX_COMPLETION_TOKENS = 2048
 
 
 @dataclass(slots=True)
@@ -136,7 +161,15 @@ def rerank(
         user=rerank_user_prompt(question, format_chunks(labelled)),
         response_format=RERANK_SCHEMA,
         model=settings.groq_small_model,
-        max_completion_tokens=1024,
+        max_completion_tokens=RERANK_MAX_COMPLETION_TOKENS,
+        # Tried "medium" here on the theory that matching a real-world scenario to the
+        # legal concept it describes (e.g. "customer support chatbot" to Article 50's "AI
+        # systems intended to interact with natural persons") needs more deliberation than
+        # "low" gives it. Measured against the live model: "medium" did not change the
+        # outcome -- every candidate still scored 0/10, including ones plainly on topic --
+        # so this stays "low" rather than paying more tokens and latency for no measured
+        # benefit. The flat-zero behaviour on colloquially-phrased questions is real and
+        # still open; see the module docstring above.
         reasoning_effort="low",
     )
 

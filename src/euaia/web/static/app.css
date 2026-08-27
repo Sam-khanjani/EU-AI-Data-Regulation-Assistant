@@ -9,6 +9,7 @@
   --good-bg: #e8f5ee;
   --bad: #a52020;
   --bad-bg: #fdeaea;
+  --warn: #8a6a1f;
   --warn-bg: #fdf5e3;
   --quote-bg: #f5f6f8;
 }
@@ -101,6 +102,7 @@ button[type=submit]:disabled { opacity: .5; cursor: progress; }
 .pill { font-size: 11px; padding: 1px 8px; border-radius: 999px; margin-left: 6px; }
 .pill.good { background: var(--good-bg); color: var(--good); }
 .pill.bad { background: var(--bad-bg); color: var(--bad); }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
 
 .followups ul, .gaps ul { color: var(--muted); font-size: 14.5px; }
 
@@ -132,6 +134,8 @@ table.corpus th, table.corpus td {
 }
 table.corpus th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 table.corpus .num { text-align: right; }
+
+.status-actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
 .planned { margin-top: 34px; font-size: 14px; }
 
 footer { border-top: 1px solid var(--line); padding-block: 18px 40px; }

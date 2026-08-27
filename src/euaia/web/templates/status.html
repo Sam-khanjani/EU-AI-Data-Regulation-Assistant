@@ -9,47 +9,17 @@
   can still be traced to the text that produced it.
 </p>
 
-<table class="corpus">
-  <thead>
-    <tr>
-      <th>Source</th><th>Version</th><th>CELEX</th><th>Format</th>
-      <th class="num">Chunks</th><th>Ingested</th><th>Content hash</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for s in sources %}
-    <tr>
-      <td>
-        {% if s.landing_url %}
-          <a href="{{ s.landing_url }}" target="_blank" rel="noopener">{{ s.title }}</a>
-        {% else %}{{ s.title }}{% endif %}
-        <div class="muted small">{{ s.publisher }}</div>
-      </td>
-      <td>
-        {{ s.version_label }}
-        {% if not s.embedded %}<span class="pill bad">not embedded</span>{% endif %}
-      </td>
-      <td><code>{{ s.celex }}</code></td>
-      <td>{{ s.format }}</td>
-      <td class="num">{{ "{:,}".format(s.chunks) }}</td>
-      <td>{{ s.ingested_at.strftime("%Y-%m-%d %H:%M") if s.ingested_at else "&mdash;"|safe }}</td>
-      <td><code class="small">{{ s.content_sha256[:16] }}</code></td>
-    </tr>
-    {% else %}
-    <tr><td colspan="7" class="muted">
-      Nothing ingested. Run <code>uv run python -m euaia.ingest.pipeline</code>.
-    </td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+{% include "partials/corpus_status.html" %}
 
 <section class="planned">
   <h2>Not yet built</h2>
   <p class="muted">
-    Change detection polls CELLAR for a newer consolidated version and flags it here for an
-    administrator to ingest. The version resolution it needs already exists
-    (<code>CellarClient.latest_consolidated</code>), and the schema records check runs and
-    supersession, so this page becomes the admin dashboard without a migration.
+    "Check for updates" polls CELLAR and flags a newer version here, but re-ingesting it is
+    still a deliberate command-line step
+    (<code>uv run python -m euaia.ingest.pipeline --source &lt;key&gt;</code>), not a button
+    on this page. Ingestion spends embedding quota and takes a source offline briefly while
+    it re-activates, so triggering it from a web request is a separate decision -- this page
+    only ever tells you a newer version exists.
   </p>
 </section>
 {% endblock %}

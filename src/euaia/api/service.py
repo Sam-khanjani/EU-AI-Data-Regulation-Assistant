@@ -16,9 +16,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from euaia.config import settings
-from euaia.db.models import Chunk, DocumentVersion, QueryLog, Source
+from euaia.db.models import CheckRun, Chunk, DocumentVersion, QueryLog, Source
 from euaia.graph.nodes import run_pipeline
 from euaia.graph.state import QueryState
+from euaia.ingest import sources
+from euaia.ingest.check import CheckResult, check_all
 from euaia.ingest.embedder import Embedder
 from euaia.llm.groq_client import GroqClient
 from euaia.verify.citations import VerifiedQuote
@@ -196,9 +198,9 @@ def _log(session: Session, state: QueryState, view: AnswerView) -> int | None:
 def corpus_status(session: Session) -> list[dict[str, Any]]:
     """Per-source corpus state, for the status page.
 
-    This is the seed of the admin dashboard: the same query answers "what is indexed, from
-    which version, ingested when" that the change detector will later annotate with "and a
-    newer version is available".
+    Includes each source's most recent change-detection result, if one has ever run --
+    ``check_outcome`` is ``None`` rather than a fabricated value until an administrator
+    actually runs a check.
     """
     rows = session.execute(
         select(Source, DocumentVersion)
@@ -217,6 +219,11 @@ def corpus_status(session: Session) -> list[dict[str, Any]]:
         chunk_count = session.query(Chunk).filter(
             Chunk.document_version_id == version.id
         ).count()
+        last_check = session.scalar(
+            select(CheckRun)
+            .where(CheckRun.source_id == source.id)
+            .order_by(CheckRun.ran_at.desc())
+        )
         out.append(
             {
                 "key": source.key,
@@ -232,6 +239,17 @@ def corpus_status(session: Session) -> list[dict[str, Any]]:
                 "chunks": chunk_count,
                 "embedded": bool(chunks),
                 "content_sha256": version.content_sha256,
+                "check_outcome": last_check.outcome if last_check else None,
+                "checked_at": last_check.ran_at if last_check else None,
             }
         )
     return out
+
+
+def check_now(session: Session) -> list[CheckResult]:
+    """Run change detection for every registered source and record the result.
+
+    A thin wrapper so the web route does not need to know about ``ingest.check`` or
+    ``ingest.sources`` directly.
+    """
+    return check_all(session, list(sources.ALL_SOURCES))

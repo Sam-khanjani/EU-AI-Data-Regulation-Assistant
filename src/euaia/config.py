@@ -57,11 +57,18 @@ class Settings(BaseSettings):
     rerank_min_score: float = 4.0
 
     # --- Token budgets ---
-    # Reranking scores paragraph-level CHUNKS (~99 tokens each), not the articles they
-    # belong to (~530 avg, 3369 max). Scoring expanded articles would put a single rerank
-    # call at ~16k tokens -- twice the free-tier minute budget -- and it is also the wrong
-    # thing to score: relevance belongs to the passage that matched.
-    rerank_token_budget: int = 2_400
+    # Reranking scores CHUNKS (packed to chunk_target_tokens, ~500 each), not the articles
+    # they belong to (~530 avg, 3369 max). Scoring expanded articles would put a single
+    # rerank call at ~16k tokens -- twice the free-tier minute budget -- and it is also the
+    # wrong thing to score: relevance belongs to the passage that matched.
+    #
+    # This must stay large enough to hold most of retrieve_candidates chunks at roughly
+    # chunk_target_tokens each, or candidates below the cutoff are silently dropped before
+    # the reranker ever sees them -- discovered when a chunk-packing rewrite quadrupled
+    # average chunk size (~99 -> ~400 tokens) without this being re-tuned to match, which
+    # left only ~6 of 20 fused candidates reaching the reranker. 3,600 is the largest value
+    # that still fits tests/test_budgets.py::TestDailyBudget's full-evaluation-run ceiling.
+    rerank_token_budget: int = 3_600
     # Total evidence handed to the answer model, after expanding survivors to articles.
     evidence_token_budget: int = 2_400
     # Output allowance for the answer call. Prompt + evidence + this must fit inside the

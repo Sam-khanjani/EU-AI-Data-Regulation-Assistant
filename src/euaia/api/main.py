@@ -145,11 +145,35 @@ def api_ask(payload: dict, session: Db):
 
 @app.get("/status", response_class=HTMLResponse)
 def status(request: Request, session: Db):
-    """Corpus status -- the seed of the admin dashboard."""
+    """Corpus status and change detection -- the admin dashboard."""
     return templates.TemplateResponse(
         request=request,
         name="status.html",
         context={"sources": service.corpus_status(session)},
+    )
+
+
+@app.post("/status/check", response_class=HTMLResponse)
+def status_check(request: Request, session: Db):
+    """HTMX endpoint: poll CELLAR for each source and re-render the corpus table.
+
+    Per-source failures (CELLAR unreachable, SPARQL timeout) are already caught inside
+    ``check_now`` and recorded as a check outcome of ``error`` -- this except is only for
+    something more fundamental (e.g. no network at all), and keeps the table on screen with
+    an inline banner rather than replacing it with a bare error, which would also strand the
+    retry button.
+    """
+    error = None
+    try:
+        service.check_now(session)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Change detection failed")
+        error = str(exc)
+
+    return templates.TemplateResponse(
+        request=request,
+        name="partials/corpus_status.html",
+        context={"sources": service.corpus_status(session), "check_error": error},
     )
 
 

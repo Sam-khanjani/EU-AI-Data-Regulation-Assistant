@@ -483,6 +483,11 @@ def main(argv: list[str] | None = None) -> int:
         help="report how many embeddings would be needed, without calling the API",
     )
     parser.add_argument(
+        "--check",
+        action="store_true",
+        help="check CELLAR for a newer version of each source, without ingesting",
+    )
+    parser.add_argument(
         "--resume",
         type=int,
         metavar="N",
@@ -517,6 +522,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.estimate:
         return _estimate(args.source or [s.key for s in sources.ALL_SOURCES])
+
+    if args.check:
+        from euaia.ingest.check import check_all  # deferred: avoids a circular import
+
+        specs = [sources.get(k) for k in (args.source or [s.key for s in sources.ALL_SOURCES])]
+        with session_scope() as session:
+            for result in check_all(session, specs):
+                flag = " <-- newer version available" if result.outcome == "new_version" else ""
+                print(f"{result.source_key:24s} {result.outcome}{flag}")
+                if result.detail:
+                    print(f"{'':24s} {result.detail}")
+        return 0
 
     failures = 0
     for key in args.source or [s.key for s in sources.ALL_SOURCES]:

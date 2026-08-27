@@ -1,0 +1,72 @@
+<div id="corpus-status">
+  {% if check_error %}
+  <div class="banner error">
+    <strong>Could not check for updates.</strong>
+    <p>{{ check_error }}</p>
+  </div>
+  {% endif %}
+
+  <div class="status-actions">
+    <button hx-post="/status/check" hx-target="#corpus-status" hx-swap="outerHTML"
+            hx-indicator="#checking" hx-disabled-elt="this">
+      Check for updates
+    </button>
+    <span id="checking" class="htmx-indicator">Asking EUR-Lex&hellip;</span>
+  </div>
+
+  <table class="corpus">
+    <thead>
+      <tr>
+        <th>Source</th><th>Version</th><th>CELEX</th><th>Format</th>
+        <th class="num">Chunks</th><th>Ingested</th><th>Content hash</th>
+        <th>Last checked</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in sources %}
+      <tr>
+        <td>
+          {% if s.landing_url %}
+            <a href="{{ s.landing_url }}" target="_blank" rel="noopener">{{ s.title }}</a>
+          {% else %}{{ s.title }}{% endif %}
+          <div class="muted small">{{ s.publisher }}</div>
+        </td>
+        <td>
+          {{ s.version_label }}
+          {% if not s.embedded %}<span class="pill bad">not embedded</span>{% endif %}
+        </td>
+        <td><code>{{ s.celex }}</code></td>
+        <td>{{ s.format }}</td>
+        <td class="num">{{ "{:,}".format(s.chunks) }}</td>
+        <td>{{ s.ingested_at.strftime("%Y-%m-%d %H:%M") if s.ingested_at else "&mdash;"|safe }}</td>
+        <td><code class="small">{{ s.content_sha256[:16] }}</code></td>
+        <td>
+          {% if s.check_outcome == "new_version" %}
+            <span class="pill warn">newer version available</span>
+          {% elif s.check_outcome == "unchanged" %}
+            <span class="pill good">up to date</span>
+          {% elif s.check_outcome == "error" %}
+            <span class="pill bad">check failed</span>
+          {% else %}
+            <span class="muted small">not checked yet</span>
+          {% endif %}
+          {% if s.checked_at %}
+          <div class="muted small">{{ s.checked_at.strftime("%Y-%m-%d %H:%M") }}</div>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="muted">
+        Nothing ingested. Run <code>uv run python -m euaia.ingest.pipeline</code>.
+      </td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if sources and sources|selectattr("check_outcome", "equalto", "new_version")|list %}
+  <p class="muted small">
+    Re-ingest the flagged source with
+    <code>uv run python -m euaia.ingest.pipeline --source &lt;key&gt;</code>.
+  </p>
+  {% endif %}
+</div>
