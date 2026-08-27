@@ -8,12 +8,15 @@ front end.
 from __future__ import annotations
 
 import logging
+import secrets
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Form, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi import status as http_status
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
@@ -43,6 +46,33 @@ def get_session() -> Iterator[Session]:
 
 # FastAPI's modern dependency style: keeps Depends() out of argument defaults.
 Db = Annotated[Session, Depends(get_session)]
+
+_admin_security = HTTPBasic()
+
+
+def require_admin(credentials: Annotated[HTTPBasicCredentials, Depends(_admin_security)]) -> None:
+    """Gate admin-only routes behind HTTP Basic Auth.
+
+    An unset ADMIN_PASSWORD must refuse every request, not just wrong ones --
+    ``secrets.compare_digest("", "")`` is True, so a blank configured password would
+    otherwise let anyone in with a blank password field. ``compare_digest`` throughout
+    rather than ``==`` so a wrong guess cannot be timed to find out which character failed.
+    """
+    valid_username = secrets.compare_digest(
+        credentials.username.encode("utf-8"), settings.admin_username.encode("utf-8")
+    )
+    valid_password = bool(settings.admin_password) and secrets.compare_digest(
+        credentials.password.encode("utf-8"), settings.admin_password.encode("utf-8")
+    )
+    if not (valid_username and valid_password):
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+
+Admin = Depends(require_admin)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -143,9 +173,9 @@ def api_ask(payload: dict, session: Db):
     }
 
 
-@app.get("/status", response_class=HTMLResponse)
+@app.get("/status", response_class=HTMLResponse, dependencies=[Admin])
 def status(request: Request, session: Db):
-    """Corpus status and change detection -- the admin dashboard."""
+    """Corpus status and change detection -- the admin dashboard. Requires admin auth."""
     return templates.TemplateResponse(
         request=request,
         name="status.html",
@@ -153,9 +183,10 @@ def status(request: Request, session: Db):
     )
 
 
-@app.post("/status/check", response_class=HTMLResponse)
+@app.post("/status/check", response_class=HTMLResponse, dependencies=[Admin])
 def status_check(request: Request, session: Db):
-    """HTMX endpoint: poll CELLAR for each source and re-render the corpus table.
+    """HTMX endpoint: poll CELLAR for each source and re-render the corpus table. Requires
+    admin auth.
 
     Per-source failures (CELLAR unreachable, SPARQL timeout) are already caught inside
     ``check_now`` and recorded as a check outcome of ``error`` -- this except is only for

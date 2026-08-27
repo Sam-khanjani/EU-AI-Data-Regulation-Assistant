@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     google_api_key: str = ""
 
+    # --- Admin auth ---
+    # Gates /status and /status/check (corpus contents, change detection -- not meant for
+    # every visitor). No default password: an empty value must refuse every request rather
+    # than silently accepting an empty one, so admin/api/main.py checks for that explicitly
+    # rather than relying on a default here.
+    admin_username: str = "admin"
+    admin_password: str = ""
+
     # --- Database ---
     # No default: must be set in .env. Keeps the repo free of any embedded credential,
     # even a throwaway local one, so there is nothing for secret scanners to (correctly
