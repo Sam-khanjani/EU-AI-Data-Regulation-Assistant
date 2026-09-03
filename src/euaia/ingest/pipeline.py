@@ -23,11 +23,18 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from euaia.config import settings
 from euaia.db.models import Chunk, DocumentVersion, IngestionRun, Source, StructuralUnit
-from euaia.db.session import SessionLocal, ensure_extensions, session_scope
+from euaia.db.session import (
+    UNAVAILABLE_MESSAGE,
+    DatabaseUnavailable,
+    SessionLocal,
+    ensure_extensions,
+    session_scope,
+)
 from euaia.ingest import deeplinks, embedding_cache, sources
 from euaia.ingest.cellar import CellarClient, Manifestation, VersionRef
 from euaia.ingest.chunker import TokenCounter, chunk_document
@@ -520,6 +527,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{'':24s} {spec.notes}")
         return 0
 
+    try:
+        return _run(args)
+    except (DatabaseUnavailable, OperationalError):
+        # Both land here: session_scope()/db_session() raise DatabaseUnavailable, but
+        # embedding_cache opens its own sessions directly and can still surface the raw
+        # driver error -- catching both means the message is clean either way, without
+        # having to convert every SessionLocal() call site individually.
+        print(f"error: {UNAVAILABLE_MESSAGE}", file=sys.stderr)
+        return 1
+
+
+def _run(args: argparse.Namespace) -> int:
     if args.estimate:
         return _estimate(args.source or [s.key for s in sources.ALL_SOURCES])
 

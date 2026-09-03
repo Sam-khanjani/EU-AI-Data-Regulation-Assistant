@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from euaia.api import service
 from euaia.config import settings
-from euaia.db.session import SessionLocal
+from euaia.db.session import DatabaseUnavailable, db_session
 from euaia.ingest.embedder import EmbeddingError
 from euaia.llm.groq_client import LLMError
 
@@ -36,12 +36,20 @@ app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
 
+@app.exception_handler(DatabaseUnavailable)
+async def database_unavailable_handler(request: Request, exc: DatabaseUnavailable):
+    """Show a clear message instead of a connection-pool stack trace.
+
+    Also catches the raw sqlalchemy.exc.OperationalError case: db_session() converts it
+    to DatabaseUnavailable, but that conversion only happens where a session is actually
+    opened -- this handler is the safety net for the response either way.
+    """
+    return HTMLResponse(f"<h1>503 Service Unavailable</h1><p>{exc}</p>", status_code=503)
+
+
 def get_session() -> Iterator[Session]:
-    session = SessionLocal()
-    try:
+    with db_session() as session:
         yield session
-    finally:
-        session.close()
 
 
 # FastAPI's modern dependency style: keeps Depends() out of argument defaults.
