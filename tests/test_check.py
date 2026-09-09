@@ -101,7 +101,7 @@ def _add_active_version(session, key: str, celex: str) -> None:
             version_label=f"consolidated {celex}",
             celex=celex,
             content_sha256="a" * 64,
-            format="formex",
+            format="pdf",
             status="active",
         )
     )

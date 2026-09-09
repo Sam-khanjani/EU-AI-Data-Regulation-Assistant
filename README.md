@@ -11,9 +11,12 @@ can be safely re-ingested when the regulation changes.
 
 ## How it works
 
-1. **Ingest** — the EU AI Act is pulled from EUR-Lex (CELLAR API, Formex XML), parsed into
-   its actual legal structure (articles, paragraphs, annexes, recitals), chunked, and
-   embedded.
+1. **Ingest** — the EU AI Act is pulled from EUR-Lex (CELLAR API) as PDF and parsed into its
+   actual legal structure (articles, paragraphs, annexes, recitals), chunked, and embedded.
+   The consolidated text is read from the bookmark outline EUR-Lex authors inside the file,
+   rather than by guessing headings from fonts. The recitals come from the as-adopted act,
+   whose PDF has no such outline — they are recovered from the preamble instead, and the
+   parse is only accepted if the recital numbering forms a complete 1..N run.
 2. **Retrieve** — a hybrid search (vector similarity + full-text + direct article lookup)
    finds candidate provisions, which are reranked for relevance.
 3. **Generate** — the answering model is required to return each claim together with the
@@ -30,7 +33,7 @@ resolve it. The determination depends on facts only the user has.
 
 | Layer | Choice |
 |---|---|
-| Source | EUR-Lex CELLAR REST + SPARQL, Formex XML |
+| Source | EUR-Lex CELLAR REST + SPARQL, PDF (bookmark outline + preamble) |
 | Store | Postgres 17 + pgvector |
 | Embeddings | Gemini `gemini-embedding-001` |
 | Generation | Groq `openai/gpt-oss-120b`, structured output |
@@ -81,7 +84,7 @@ uv run python -m eval.harness   # scored against a seeded question set
 
 ```
 src/euaia/
-  ingest/     CELLAR client, Formex parser, chunker, embedder, pipeline
+  ingest/     CELLAR client, PDF readers, chunker, embedder, pipeline
   retrieval/  hybrid dense + full-text + structural lookup, reranker
   graph/      pipeline nodes, state, prompts
   llm/        Groq client and structured-output schemas

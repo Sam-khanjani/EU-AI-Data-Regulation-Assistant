@@ -1,6 +1,6 @@
-"""Normalisation must fold real Formex artefacts without losing the way back.
+"""Normalisation must fold real typesetting artefacts without losing the way back.
 
-Every case here is taken from, or modelled on, text actually present in the AI Act Formex:
+Every case here is taken from, or modelled on, text actually present in the AI Act:
 non-breaking spaces in article titles ('Article\\xa04a'), curly quotes, non-breaking
 hyphens in 'high-risk', and XML indentation inside sentences.
 """
@@ -113,8 +113,8 @@ class TestIdempotence:
 class TestMatchingBehaviour:
     """The property the verifier actually depends on."""
 
-    def test_model_style_quote_matches_formex_source(self):
-        # Source as it appears in Formex, quote as a model would plausibly emit it.
+    def test_model_style_quote_matches_published_source(self):
+        # Source as published, quote as a model would plausibly emit it.
         source = (
             "that AI system shall be considered to be high‑risk where both of the\n"
             "        following conditions are fulfilled:"

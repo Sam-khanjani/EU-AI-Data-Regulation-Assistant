@@ -3,7 +3,7 @@
 The anchor scheme was read off the real rendered document rather than guessed:
 ``art_6``, ``art_4a`` (inserted articles get anchors too), ``anx_III``, ``rct_27``. The
 consolidated act contains exactly 119 ``art_`` anchors, matching the 119 articles the
-Formex parser finds -- so a link built from ``unit_number`` resolves for every article.
+parser finds -- so a link built from ``unit_number`` resolves for every article.
 
 There is no paragraph-level anchor in EUR-Lex's rendering, so a paragraph links to its
 parent article; the exact paragraph text is shown in our own UI alongside the link.

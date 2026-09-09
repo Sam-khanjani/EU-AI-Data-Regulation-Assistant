@@ -30,10 +30,15 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    # connect_args is set here as well as in euaia.db.session, not instead of it: this engine
+    # is built from the ini section and inherits nothing from the application's. Without it an
+    # unreachable database makes `alembic upgrade` hang for the OS TCP timeout rather than
+    # failing in five seconds with a usable message.
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={"connect_timeout": 5},
     )
 
     with connectable.connect() as connection:

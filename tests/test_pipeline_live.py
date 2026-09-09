@@ -1,7 +1,7 @@
 """End-to-end pipeline tests against the real answering model.
 
 These run the whole graph -- analyse, rerank, generate, verify, finalise -- against Groq,
-using **real AI Act text** parsed from the cached Formex. Only two things are stubbed:
+using **real AI Act text** parsed from the cached PDF. Only two things are stubbed:
 
 * **Query embeddings.** The Gemini free tier allows 1,000 items per day and the corpus
   needs 779, so spending quota on tests would make ingestion impossible. Retrieval here
@@ -25,12 +25,12 @@ from euaia.config import settings
 from euaia.db.models import Chunk, DocumentVersion, Source, StructuralUnit
 from euaia.db.session import SessionLocal, engine
 from euaia.ingest import deeplinks
-from euaia.ingest.formex import parse
+from euaia.ingest.pdf_parser import parse
 from euaia.verify.normalize import normalize_text
 
 CORPUS_KEY = "pytest-live-corpus"
 CELEX = "02024R1689-20260727"
-RAW = settings.raw_data_dir / f"consolidated_{CELEX}.xml"
+RAW = settings.raw_data_dir / f"{CELEX}.ENG.pdf"
 
 # A small but genuinely representative slice: a prohibition, the high-risk test, the
 # transparency duty, and the annex the high-risk test refers to.
@@ -49,7 +49,7 @@ def _db_available() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not (settings.groq_api_key and _db_available() and RAW.exists()),
-    reason="needs GROQ_API_KEY, Postgres, and the cached AI Act Formex",
+    reason="needs GROQ_API_KEY, Postgres, and the cached AI Act PDF",
 )
 
 
@@ -94,7 +94,7 @@ def corpus():
             version_label="consolidated 2026-07-27",
             celex=CELEX,
             content_sha256="f" * 64,
-            format="formex",
+            format="pdf",
             status="active",
         )
         session.add(version)
@@ -106,7 +106,7 @@ def corpus():
             if (u.unit_type == "article" and u.unit_number in WANTED_ARTICLES)
             or (u.unit_type == "annex" and u.unit_number in WANTED_ANNEXES)
         ]
-        assert wanted, "expected provisions not found in the cached Formex"
+        assert wanted, "expected provisions not found in the cached PDF"
 
         for unit in wanted:
             row = StructuralUnit(

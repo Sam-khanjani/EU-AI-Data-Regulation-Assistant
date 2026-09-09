@@ -79,7 +79,7 @@ def corpus():
             version_label="superseded 2020-01-01",
             celex="09999R0001-20200101",
             content_sha256="0" * 64,
-            format="formex",
+            format="pdf",
             status="superseded",
             doc_date=dt.date(2020, 1, 1),
         )
@@ -88,7 +88,7 @@ def corpus():
             version_label="consolidated 2026-07-27",
             celex="09999R0001-20260727",
             content_sha256="1" * 64,
-            format="formex",
+            format="pdf",
             status="active",
             doc_date=dt.date(2026, 7, 27),
         )

@@ -16,11 +16,19 @@ The split matters for correctness, not tidiness. Both documents contain an "Arti
 only the consolidated one carries the amendments. Indexing both would let the assistant cite
 superseded wording as if it were in force, so ``unit_types`` restricts the recitals source
 to recitals.
+
+Both are read from PDF, but from *different documents needing different readers*, which is
+why ``parser`` is stated explicitly on both rather than defaulted -- see the field's docstring.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
+
+Parser = Literal["pdf_outline", "pdf_preamble"]
+"""Declared locally rather than imported from ``euaia.db.models``: this module is pure data
+seeded into the ``source`` table, and should not drag SQLAlchemy in behind it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +46,23 @@ class SourceSpec:
 
     use_consolidated: bool = True
     """Resolve the newest consolidated version rather than the as-adopted act."""
+
+    parser: Parser = "pdf_outline"
+    """Which reader turns this source's PDF into units.
+
+    A property of the source rather than something sniffed from the bytes: getting it wrong
+    would index the unamended text, so it is declared once, here.
+
+    ``pdf_outline``
+        Structure from the PDF's own bookmark outline. The consolidated act carries 165
+        bookmarks naming every chapter, section, article and annex -- publisher-authored
+        structure, so nothing has to be inferred from fonts.
+    ``pdf_preamble``
+        Recitals from the preamble text. The as-adopted act carries only 14 bookmarks
+        (annexes alone), so there is no outline to read; the reader works from the enacting
+        formula, the typographic size of the hanging number, and the 1..N run instead. See
+        :mod:`euaia.ingest.pdf_recitals`.
+    """
 
     unit_types: frozenset[str] | None = None
     """Restrict which parsed unit types get indexed. ``None`` means all embeddable types."""
@@ -57,6 +82,7 @@ AI_ACT = SourceSpec(
     eli_uri="http://data.europa.eu/eli/reg/2024/1689/oj",
     landing_url="https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:32024R1689",
     use_consolidated=True,
+    parser="pdf_outline",
     unit_types=None,
     doc_title="Regulation (EU) 2024/1689 (AI Act)",
     notes="Consolidated operative text. Re-consolidated whenever the Act is amended.",
@@ -71,6 +97,7 @@ AI_ACT_RECITALS = SourceSpec(
     eli_uri="http://data.europa.eu/eli/reg/2024/1689/oj",
     landing_url="https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:32024R1689",
     use_consolidated=False,
+    parser="pdf_preamble",
     unit_types=frozenset({"recital"}),
     doc_title="Regulation (EU) 2024/1689 (AI Act)",
     notes="Recitals from the act as adopted; consolidation omits them.",

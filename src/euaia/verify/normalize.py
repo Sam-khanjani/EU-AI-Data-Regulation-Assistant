@@ -1,7 +1,7 @@
 """Text normalisation with an exact offset map back to the original.
 
 Why this exists: citation verification asks "does this quote appear verbatim in the source?".
-Formex-derived legal text is full of characters that make a naive answer *wrong*:
+PDF-derived legal text is full of characters that make a naive answer *wrong*:
 
     'Article\\xa06'          non-breaking space instead of a space
     'the \\u2018provider\\u2019'   curly quotes where a model will emit straight ones
@@ -11,6 +11,11 @@ Formex-derived legal text is full of characters that make a naive answer *wrong*
 
 Matching on raw text rejects *correct* quotes because of these, which silently destroys the
 coverage metric -- the system would abstain on good answers and we would blame the model.
+
+One case this module deliberately does *not* handle: a word hyphenated across a line
+break (``'cumu\xad\nlative'``). Discarding the soft hyphen and then collapsing
+whitespace -- the order below -- would yield ``'cumu lative'``. The PDF readers rejoin
+those at parse time, before text ever reaches here.
 
 So we match on a normalised copy, and keep an offset map so the quote we display and the
 deep link we emit still point at the original characters.

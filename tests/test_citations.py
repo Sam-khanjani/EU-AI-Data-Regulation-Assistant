@@ -5,7 +5,7 @@ adversarially: the interesting cases are the ones where a model tries to pass of
 regulation does not contain.
 
 Source text below is the real Article 6(1) and Article 5(1)(a) wording, including the
-non-breaking hyphen and XML indentation that appear in the Formex.
+non-breaking hyphen and line wrapping that appear in the source text.
 """
 
 from __future__ import annotations

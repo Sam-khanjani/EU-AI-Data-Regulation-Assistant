@@ -22,8 +22,8 @@ dependencies = [
     "pydantic-settings>=2.6",
     # ingestion
     "httpx>=0.28",
-    "lxml>=5.3",
     "beautifulsoup4>=4.12",
+    "pdfplumber>=0.11",
     "tenacity>=9.0",
     # models
     "groq>=0.13",

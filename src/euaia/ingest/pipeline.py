@@ -19,10 +19,12 @@ import logging
 import sys
 import time
 import zlib
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -35,11 +37,11 @@ from euaia.db.session import (
     ensure_extensions,
     session_scope,
 )
-from euaia.ingest import deeplinks, embedding_cache, sources
+from euaia.ingest import deeplinks, embedding_cache, pdf_parser, pdf_recitals, sources
 from euaia.ingest.cellar import CellarClient, Manifestation, VersionRef
 from euaia.ingest.chunker import TokenCounter, chunk_document
+from euaia.ingest.document import ParsedDocument
 from euaia.ingest.embedder import Embedder
-from euaia.ingest.formex import ParsedDocument, parse
 from euaia.ingest.sources import SourceSpec
 from euaia.verify.normalize import normalize_text
 
@@ -88,28 +90,60 @@ def resolve_target(client: CellarClient, spec: SourceSpec) -> VersionRef:
     return client.resolve_base_work(spec.celex_base or "")
 
 
-def fetch_content(client: CellarClient, spec: SourceSpec, ref: VersionRef) -> Manifestation:
-    """Fetch, caching raw bytes so re-runs and tests do not re-hit CELLAR."""
+def fetch_pdf_content(
+    client: CellarClient, ref: VersionRef, language: str = "ENG"
+) -> tuple[Manifestation, Path]:
+    """Fetch a version's PDF, caching it under ``raw_data_dir``.
+
+    A version's bytes never change once published, so re-downloading a 1.3 MB file on every
+    run is pure waste. Returns the manifestation and the path it was written to.
+    """
     settings.raw_data_dir.mkdir(parents=True, exist_ok=True)
-    tag = ("consolidated_" if spec.use_consolidated else "original_") + ref.celex
-    path = settings.raw_data_dir / f"{tag}.xml"
+    path = settings.raw_data_dir / f"{ref.celex}.{language}.pdf"
 
     if path.exists():
         content = path.read_bytes()
         log.info("Using cached %s (%d bytes)", path.name, len(content))
-        return Manifestation(
-            content=content,
-            fmt="formex",
-            sha256=hashlib.sha256(content).hexdigest(),
-            filename=path.name,
+        return (
+            Manifestation(
+                content=content,
+                fmt="pdf",
+                sha256=hashlib.sha256(content).hexdigest(),
+                filename=path.name,
+            ),
+            path,
         )
 
-    manifestation = client.fetch(ref.cellar_id)
+    manifestation = client.fetch_pdf(ref.celex, language)
     path.write_bytes(manifestation.content)
-    log.info(
-        "Fetched %s as %s (%d bytes)", ref.celex, manifestation.fmt, len(manifestation.content)
-    )
+    log.info("Fetched %s as PDF (%d bytes)", ref.celex, len(manifestation.content))
+    return manifestation, path
+
+
+def fetch_content(client: CellarClient, spec: SourceSpec, ref: VersionRef) -> Manifestation:
+    """Fetch this source's PDF, caching the bytes so re-runs do not re-hit CELLAR."""
+    manifestation, _ = fetch_pdf_content(client, ref)
     return manifestation
+
+
+# One place decides which reader turns a source's bytes into units, so --estimate can never
+# measure a different parse from the one that will actually run.
+_PARSERS: dict[str, Callable[[bytes], ParsedDocument]] = {
+    "pdf_outline": pdf_parser.parse,
+    "pdf_preamble": pdf_recitals.parse_recitals,
+}
+
+
+def parse_content(spec: SourceSpec, manifestation: Manifestation) -> ParsedDocument:
+    """Parse fetched bytes with the reader this source declares."""
+    try:
+        parser = _PARSERS[spec.parser]
+    except KeyError:
+        raise ValueError(
+            f"{spec.key}: no parser named {spec.parser!r}; "
+            f"known parsers: {', '.join(sorted(_PARSERS))}"
+        ) from None
+    return parser(manifestation.content)
 
 
 class ConcurrentIngestion(RuntimeError):
@@ -177,10 +211,12 @@ def _ingest_source_locked(
         ref = resolve_target(client, spec)
         manifestation = fetch_content(client, spec, ref)
 
-    if manifestation.fmt != "formex":
-        raise NotImplementedError(
-            f"{spec.key}: only Formex ingestion is implemented, got {manifestation.fmt}. "
-            "An XHTML fallback parser is needed for sources CELLAR does not publish in Formex."
+    # Every reader here expects PDF bytes. Fail before handing them something else rather
+    # than during parsing, where the error would name a symptom instead of the cause.
+    if manifestation.fmt != "pdf":
+        raise RuntimeError(
+            f"{spec.key}: expected a PDF from CELLAR, got {manifestation.fmt!r}. "
+            "Ingesting would run a PDF reader over bytes that are not a PDF."
         )
 
     with session_scope() as session:
@@ -193,12 +229,26 @@ def _ingest_source_locked(
             )
         )
         if existing and existing.content_sha256 == manifestation.sha256 and not force:
-            return IngestResult(
-                source_key=spec.key,
-                status="up-to-date",
-                version_label=existing.version_label,
-                celex=ref.celex,
-                detail="content hash unchanged",
+            stored_chunks = session.scalar(
+                select(func.count())
+                .select_from(Chunk)
+                .where(Chunk.document_version_id == existing.id)
+            )
+            # "Unchanged" is not the same as "done". A --skip-embeddings run leaves the
+            # version active with its units written but no chunks, and reporting that as
+            # up-to-date would strand the corpus: unsearchable, and with the pipeline
+            # insisting nothing needs doing. Only unchanged *and complete* counts as done.
+            if stored_chunks or skip_embeddings:
+                return IngestResult(
+                    source_key=spec.key,
+                    status="up-to-date",
+                    version_label=existing.version_label,
+                    celex=ref.celex,
+                    detail="content hash unchanged",
+                )
+            log.info(
+                "%s: content unchanged but no chunks stored; embedding the existing version",
+                spec.key,
             )
 
         version = _create_version(session, source, spec, ref, manifestation)
@@ -284,7 +334,7 @@ def _ingest_content(
     max_embeddings: int | None = None,
 ) -> tuple[int, int]:
     """Parse, persist units, chunk and embed. Returns (unit count, chunk count)."""
-    doc = parse(manifestation.content)
+    doc = parse_content(spec, manifestation)
     drafts = chunk_document(doc, spec.doc_title or spec.title, TokenCounter(), spec.unit_types)
 
     with session_scope() as session:
@@ -378,6 +428,7 @@ def _write_units(
                 text=unit.text,
                 text_normalized=normalize_text(unit.text),
                 ordinal=unit.ordinal,
+                page=unit.page,
                 eurlex_deeplink=deeplinks.build(
                     ref.celex, unit.unit_type, unit.unit_number, unit.unit_path
                 ),
@@ -495,6 +546,14 @@ def main(argv: list[str] | None = None) -> int:
         help="check CELLAR for a newer version of each source, without ingesting",
     )
     parser.add_argument(
+        "--fetch-pdf",
+        action="store_true",
+        help=(
+            "download each source's current version as PDF into data/raw and exit. "
+            "Needs no database -- it is only a SPARQL lookup plus a file download."
+        ),
+    )
+    parser.add_argument(
         "--resume",
         type=int,
         metavar="N",
@@ -539,6 +598,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.fetch_pdf:
+        return _fetch_pdf(args.source or [s.key for s in sources.ALL_SOURCES])
+
     if args.estimate:
         return _estimate(args.source or [s.key for s in sources.ALL_SOURCES])
 
@@ -611,6 +673,27 @@ def _ingest_with_resume(
     return result
 
 
+def _fetch_pdf(keys: list[str]) -> int:
+    """Download each source's current version as PDF. No database, no embedding quota."""
+    failures = 0
+    with CellarClient() as client:
+        for key in keys:
+            spec = sources.get(key)
+            try:
+                ref = resolve_target(client, spec)
+                manifestation, path = fetch_pdf_content(client, ref)
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                log.exception("PDF fetch failed for %s", key)
+                print(f"{key}: FAILED - {exc}", file=sys.stderr)
+                continue
+            size = f"{len(manifestation.content):,} bytes"
+            print(f"{spec.key:24s} {ref.label}")
+            print(f"{'':24s} {size}  sha256={manifestation.sha256[:16]}")
+            print(f"{'':24s} {path}")
+    return 1 if failures else 0
+
+
 def _estimate(keys: list[str]) -> int:
     """Report embedding cost per source without spending any quota."""
     counter = TokenCounter()
@@ -620,7 +703,7 @@ def _estimate(keys: list[str]) -> int:
             spec = sources.get(key)
             ref = resolve_target(client, spec)
             manifestation = fetch_content(client, spec, ref)
-            doc = parse(manifestation.content)
+            doc = parse_content(spec, manifestation)
             drafts = chunk_document(
                 doc, spec.doc_title or spec.title, counter, spec.unit_types
             )

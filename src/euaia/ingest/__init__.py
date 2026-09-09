@@ -1,5 +1,5 @@
 from euaia.ingest.cellar import CellarClient, CellarError, Manifestation, VersionRef
-from euaia.ingest.formex import ParsedDocument, ParsedUnit, parse, serialize_text
+from euaia.ingest.document import ParsedDocument, ParsedUnit
 
 __all__ = [
     "CellarClient",
@@ -8,6 +8,4 @@ __all__ = [
     "ParsedDocument",
     "ParsedUnit",
     "VersionRef",
-    "parse",
-    "serialize_text",
 ]

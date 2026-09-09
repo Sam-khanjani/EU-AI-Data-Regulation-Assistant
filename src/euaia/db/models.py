@@ -34,10 +34,14 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from euaia.config import settings
 
-# Stored as VARCHAR + CHECK rather than native PG enums: same validation, far less
-# migration pain when a new value is added.
+# Stored as VARCHAR rather than native PG enums: far less migration pain when a new value is
+# added. Note that `native_enum=False` alone enforces *nothing* -- SQLAlchemy's
+# `create_constraint` has defaulted to False since 1.4, and `validate_strings` is off too, so
+# these render as bare VARCHAR and accept any string at either layer. `DocFormat` opts back
+# into the CHECK because a format with no reader in the tree must not be storable; the others
+# remain documentation. Which *reader* runs is `SourceSpec.parser`, not this.
 SourceType = Enum("eurlex", "ec_page", name="source_type", native_enum=False)
-DocFormat = Enum("formex", "xhtml", "pdf", name="doc_format", native_enum=False)
+DocFormat = Enum("pdf", name="doc_format", native_enum=False, create_constraint=True)
 VersionStatus = Enum(
     "discovered", "ingesting", "active", "superseded", "failed",
     name="version_status", native_enum=False,
@@ -160,6 +164,9 @@ class StructuralUnit(Base):
     text_normalized: Mapped[str] = mapped_column(Text, nullable=False)
 
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    page: Mapped[int | None] = mapped_column(Integer)
+    """1-based page in the source PDF. Nullable because a unit whose heading could not be
+    located still gets a row; NULL means "not established", not "no pages exist"."""
     eurlex_deeplink: Mapped[str | None] = mapped_column(Text)
 
     document_version: Mapped[DocumentVersion] = relationship(back_populates="units")

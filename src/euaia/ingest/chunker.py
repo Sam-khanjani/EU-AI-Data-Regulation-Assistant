@@ -34,7 +34,7 @@ from dataclasses import dataclass
 import tiktoken
 
 from euaia.config import settings
-from euaia.ingest.formex import ParsedDocument, ParsedUnit
+from euaia.ingest.document import ParsedDocument, ParsedUnit
 
 log = logging.getLogger(__name__)
 
@@ -322,9 +322,13 @@ def _split_words(text: str, budget: int, counter: TokenCounter) -> list[str]:
 def _split_body(body: str, breadcrumb: str, counter: TokenCounter) -> list[str]:
     """Split an over-long unit on line boundaries.
 
-    Our serialiser emits one line per block element, so line boundaries fall between
-    numbered points rather than mid-sentence. A quote can therefore never be split in half,
-    which keeps citation verification able to find it.
+    Lines here are *typeset* lines, since that is what the PDF readers emit, so a split can
+    land mid-sentence.
+
+    That cannot break citation: verification runs against ``structural_unit.text``, not
+    against the chunk, and ``normalize_text`` collapses all whitespace before matching. The
+    cost is retrieval quality -- a chunk cut mid-sentence is a slightly worse thing for the
+    reranker to score -- not correctness.
     """
     budget = settings.chunk_max_tokens - counter.count(breadcrumb) - 8  # separator slack
     if budget <= 0:
@@ -341,8 +345,8 @@ def _split_body(body: str, breadcrumb: str, counter: TokenCounter) -> list[str]:
     for line in body.split("\n"):
         line_tokens = counter.count(line)
 
-        # A single line longer than the whole budget. Our serialiser emits one line per
-        # block element, so this means one very long unbroken provision.
+        # A single line longer than the whole budget: an unusually long typeset line, or a
+        # provision set as one unbroken run.
         if line_tokens > budget:
             if current:
                 out.append("\n".join(current))

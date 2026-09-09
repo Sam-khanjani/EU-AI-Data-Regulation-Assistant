@@ -5,9 +5,20 @@ Two capabilities:
 * **Version resolution** via the SPARQL endpoint -- find every consolidated version of a
   regulation and pick the newest. This is the change-detection signal: consolidated acts
   are separate works with their own CELEX, so "is there a new version?" is a metadata
-  question, not a diff of rendered HTML.
-* **Content retrieval** via the REST API with ``Accept``-header content negotiation,
-  preferring Formex XML (structured, article-level markup) over XHTML.
+  question, not a diff of a rendered page.
+* **Content retrieval** via the REST API. We fetch the PDF rendering (structured
+  article-level markup) or PDF/A.
+
+**Why retrieving a PDF takes two requests.** CELLAR models a document as a
+*work* with one *expression* per language, and one *manifestation* per format. Requesting
+the work URI with ``Accept: application/pdf`` returns 404 -- the PDF is not negotiable at
+that level. It has to be addressed as its own manifestation, and the file itself lives one
+level below that again, at ``<manifestation>/DOC_1``. So PDF retrieval is: SPARQL for the
+manifestation whose ``cdm:manifestation_type`` is ``pdfa2a``, then fetch its item.
+
+The manifestation suffixes (``.0001.01``, ``.0001.02``, ...) are *not* stable across
+documents -- PDF happened to be ``.02`` for the AI Act, but that ordering
+is an accident of registration order. Always resolve by manifestation type, never by suffix.
 
 The predicate used for consolidation was established empirically against the live endpoint:
 ``cdm:act_consolidated_consolidates_resource_legal`` runs *from* the consolidated act *to*
@@ -23,15 +34,13 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
-import io
 import logging
-import zipfile
 from dataclasses import dataclass
 
 import httpx
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -42,10 +51,9 @@ log = logging.getLogger(__name__)
 
 CDM = "http://publications.europa.eu/ontology/cdm#"
 
-# Content negotiation values that CELLAR actually honours (verified against the live API;
-# `application/xml;mtype=fmx4` returns 400 -- Formex is only served zipped).
-ACCEPT_FORMEX_ZIP = "application/zip;mtype=fmx4"
-ACCEPT_XHTML = "application/xhtml+xml"
+# cdm:manifestation_type of the PDF rendering. PDF/A-2a is the archival profile the
+# Publications Office registers for consolidated acts.
+PDF_MANIFESTATION_TYPE = "pdfa2a"
 
 
 class CellarError(RuntimeError):
@@ -80,7 +88,7 @@ class Manifestation:
     """Raw bytes retrieved for one version, plus how we got them."""
 
     content: bytes
-    fmt: str  # "formex" | "xhtml"
+    fmt: str  # currently always "pdf"
     sha256: str
     filename: str | None = None
 
@@ -128,7 +136,7 @@ class CellarClient:
     # ------------------------------------------------------------------ SPARQL
 
     @retry(
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TransportError)),
+        retry=retry_if_exception(_is_retryable),
         stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=2, min=2, max=30),
         reraise=True,
@@ -214,68 +222,72 @@ class CellarClient:
 
     # ----------------------------------------------------------------- content
 
+    def pdf_manifestation_uri(self, celex: str, language: str = "ENG") -> str:
+        """Find the URI of the PDF manifestation for one version's CELEX.
+
+        Resolved by manifestation *type* rather than by URI suffix -- see the module
+        docstring for why the suffix cannot be relied on.
+        """
+        rows = self.sparql(
+            f"""
+            PREFIX cdm: <{CDM}>
+            SELECT DISTINCT ?manif WHERE {{
+              ?work cdm:resource_legal_id_celex ?celex .
+              FILTER(STR(?celex) = "{celex}")
+              ?expr cdm:expression_belongs_to_work ?work ;
+                    cdm:expression_uses_language ?lang .
+              FILTER(CONTAINS(STR(?lang), "{language}"))
+              ?manif cdm:manifestation_manifests_expression ?expr ;
+                     cdm:manifestation_type ?type .
+              FILTER(STR(?type) = "{PDF_MANIFESTATION_TYPE}")
+            }}
+            LIMIT 1
+            """
+        )
+        if not rows:
+            raise CellarError(
+                f"no {PDF_MANIFESTATION_TYPE} manifestation found for CELEX {celex} "
+                f"in language {language}"
+            )
+        return rows[0]["manif"]
+
+    def fetch_pdf(self, celex: str, language: str = "ENG") -> Manifestation:
+        """Download the PDF/A rendering of one version, addressed by its CELEX.
+
+        Takes a CELEX rather than a cellar id because the PDF is found through the
+        expression/manifestation graph, which is keyed on the work's CELEX -- the cellar id
+        of the work is not part of that lookup.
+        """
+        manifestation = self.pdf_manifestation_uri(celex, language)
+        # The manifestation URI is the *description* of the file; the bytes live one level
+        # below it. https rather than the http the graph returns, so the fetch is not a
+        # redirect away from TLS.
+        item = f"{manifestation.replace('http://', 'https://', 1)}/DOC_1"
+        resp = self._get_item(item)
+        content = resp.content
+        if not content.startswith(b"%PDF-"):
+            raise CellarError(
+                f"expected a PDF from {item}, got {resp.headers.get('content-type')!r}"
+            )
+        return Manifestation(
+            content=content,
+            fmt="pdf",
+            sha256=hashlib.sha256(content).hexdigest(),
+            filename=f"{celex}.{language}.pdf",
+        )
+
     @retry(
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TransportError)),
+        retry=retry_if_exception(_is_retryable),
         stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=2, min=2, max=30),
         reraise=True,
     )
-    def _get_manifestation(self, cellar_id: str, accept: str, language: str) -> httpx.Response:
-        resp = self._client.get(
-            f"{settings.cellar_resource_base}/{cellar_id}",
-            headers={"Accept": accept, "Accept-Language": language},
-        )
+    def _get_item(self, url: str) -> httpx.Response:
+        """GET an absolute CELLAR item URL (as opposed to a work id under the base)."""
+        resp = self._client.get(url)
         if not _ok(resp):
             resp.raise_for_status()
         return resp
-
-    def fetch(self, cellar_id: str, language: str = "eng") -> Manifestation:
-        """Retrieve a version's content, preferring Formex XML over XHTML.
-
-        Formex gives explicit ARTICLE / PARAG / CONS.ANNEX markup, which is what makes
-        article-level citation possible. XHTML is the fallback for documents CELLAR does
-        not publish in Formex.
-        """
-        try:
-            resp = self._get_manifestation(cellar_id, ACCEPT_FORMEX_ZIP, language)
-            filename, xml = extract_formex_xml(resp.content)
-            return Manifestation(
-                content=xml,
-                fmt="formex",
-                sha256=hashlib.sha256(xml).hexdigest(),
-                filename=filename,
-            )
-        except (httpx.HTTPStatusError, CellarError, zipfile.BadZipFile) as exc:
-            log.warning(
-                "Formex unavailable for %s (%s); falling back to XHTML", cellar_id, exc
-            )
-
-        resp = self._get_manifestation(cellar_id, ACCEPT_XHTML, language)
-        return Manifestation(
-            content=resp.content,
-            fmt="xhtml",
-            sha256=hashlib.sha256(resp.content).hexdigest(),
-        )
-
-
-def extract_formex_xml(zip_bytes: bytes) -> tuple[str, bytes]:
-    """Pull the main document XML out of a Formex ZIP.
-
-    A Formex bundle holds the act plus per-annex files and a small ``*.doc.xml`` metadata
-    wrapper. The act itself is reliably the largest non-``.doc.xml`` entry (530 KB vs
-    1.5 KB for the wrapper in the consolidated AI Act).
-    """
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        candidates = [
-            info
-            for info in zf.infolist()
-            if info.filename.lower().endswith(".xml")
-            and not info.filename.lower().endswith(".doc.xml")
-        ]
-        if not candidates:
-            raise CellarError("Formex archive contains no usable XML entry")
-        main = max(candidates, key=lambda i: i.file_size)
-        return main.filename, zf.read(main.filename)
 
 
 def _ok(resp: httpx.Response) -> bool:
