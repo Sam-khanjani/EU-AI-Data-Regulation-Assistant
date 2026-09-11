@@ -28,6 +28,8 @@ dependencies = [
     # models
     "groq>=0.13",
     "google-genai>=0.3",
+    # local reranking (cross-encoder, runs on CPU, no API quota)
+    "sentence-transformers>=3.3",
     # graph
     "langgraph>=0.2.50",
     # utilities

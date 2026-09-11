@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -26,12 +27,27 @@ from euaia.config import settings
 from euaia.db.session import DatabaseUnavailable, db_session
 from euaia.ingest.embedder import EmbeddingError
 from euaia.llm.groq_client import LLMError
+from euaia.retrieval import rerank as reranker
 
 log = logging.getLogger(__name__)
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
-app = FastAPI(title="EU AI Act Assistant", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Load the reranker before serving.
+
+    The weights are gigabytes and take seconds to read. Loading lazily would charge that
+    to whoever asks the first question, which looks exactly like the latency problem this
+    reranker was introduced to remove. Failure here is logged, not fatal: the model is
+    retried on first use and the error surfaces there with its own message.
+    """
+    reranker.warm()
+    yield
+
+
+app = FastAPI(title="EU AI Act Assistant", version="0.1.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 

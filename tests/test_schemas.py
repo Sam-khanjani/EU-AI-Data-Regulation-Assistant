@@ -21,7 +21,6 @@ from euaia.llm import schemas
 
 ALL_SCHEMAS = {
     "query_analysis": schemas.QUERY_ANALYSIS_SCHEMA,
-    "rerank": schemas.RERANK_SCHEMA,
     "grounded_answer": schemas.ANSWER_SCHEMA,
     "criteria_assessment": schemas.ASSESSMENT_SCHEMA,
 }

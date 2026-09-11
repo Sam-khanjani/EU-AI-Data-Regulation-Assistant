@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # --- Models ---
     # Answer generation. Must be a Groq model supporting strict JSON schema mode.
     groq_model: str = "openai/gpt-oss-120b"
-    # Query analysis + reranking: cheaper, also strict-capable.
+    # Query analysis. Reranking used to share this model; it is local now.
     groq_small_model: str = "openai/gpt-oss-20b"
 
     embed_model: str = "gemini-embedding-001"
@@ -61,22 +61,66 @@ class Settings(BaseSettings):
     # --- Retrieval ---
     retrieve_candidates: int = 20
     rerank_keep: int = 4
-    # Reranker score (0-10) below which a candidate is treated as irrelevant.
-    rerank_min_score: float = 4.0
+
+    # --- Reranking (local cross-encoder, no API quota) ---
+    # Apache-2.0. Downloaded from the Hugging Face Hub on first use and cached under
+    # HF_HOME; see "Reranker model" in README.md. The default is ~2.3 GB at fp32.
+    #
+    # Scored against eval/questions.yaml (20 questions with known articles/annexes, 20
+    # candidates each, identical pools per model). 12 CPU threads, fp32, max_length 512:
+    #
+    #   model                                P@1    R@4    nDCG@4   ms/pair   20 candidates
+    #   ms-marco-MiniLM-L-6-v2         23M   0.95   0.912  0.915        42       ~0.8 s
+    #   bge-reranker-v2-m3            568M   0.95   0.921  0.922      1481        ~30 s
+    #   bge-reranker-base             278M   0.95   0.846  0.864       442       ~8.8 s
+    #
+    # Those numbers make the models look interchangeable. They are NOT, and the benchmark
+    # is what is misleading: it scored only `eu-ai-act` chunks, so recitals -- which are
+    # short, quote-like, and lexically near-identical to a question -- never appeared as
+    # distractors. In the real pool they dominate, and the two models handle them very
+    # differently. For "Which AI practices are prohibited?" over the real 20 candidates:
+    #
+    #   MiniLM   1. Recital 45  2. Recital 28  3. Article 5  4. Article 5
+    #   v2-m3    1. Article 5   2. Article 5   3. Recital 28 4. Recital 31
+    #
+    # MiniLM prefers the short recital that echoes the question's wording. Because
+    # fit_token_budget then spends the evidence budget on those tiny units first, Article 5
+    # (~3,000 tokens) no longer fits and is dropped -- the answer model is handed two
+    # recitals saying prohibitions "should not be affected", cannot list a single
+    # prohibited practice, and abstains. Three live tests fail exactly this way.
+    #
+    # So v2-m3 stays the default despite costing 35x the compute: it buys correctness on
+    # the most basic question in the evaluation set, not a point of nDCG.
+    # bge-reranker-base is dominated on every axis and is recorded only as measured.
+    # Switch with RERANK_MODEL; no code change.
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # Cap on (query + passage) tokens per pair.
+    #
+    # v2-m3 accepts up to 8,194 positions, but the window is what costs: it measured 68s at
+    # 1,536 against ~30s at 512 on the same 20 candidates. 512 buys back most of that.
+    # Note this is a HARD CEILING for ms-marco-MiniLM-L-6-v2 -- that model is BERT-based
+    # with max_position_embeddings=512, so raising this while it is selected will fail at
+    # inference.
+    #
+    # About 27% of chunks are longer than 512 tokens and have their tail truncated *for
+    # scoring only*. The answer model is still shown the full text of whatever survives, so
+    # truncation here can cost ranking accuracy but can never make a quote unverifiable.
+    rerank_max_length: int = 512
+    rerank_batch_size: int = 8
+    # Normalised (sigmoid) score below which a candidate is treated as irrelevant.
+    # DELIBERATELY PERMISSIVE AND NOT YET CALIBRATED -- see the warning in
+    # euaia.retrieval.rerank.rerank, which records the measurements showing that no single
+    # absolute cutoff separates in-corpus from out-of-corpus questions on this corpus.
+    # Correctness is protected downstream by citation verification and the coverage gate.
+    rerank_min_score: float = 0.005
 
     # --- Token budgets ---
-    # Reranking scores CHUNKS (packed to chunk_target_tokens, ~500 each), not the articles
-    # they belong to (~530 avg, 3369 max). Scoring expanded articles would put a single
-    # rerank call at ~16k tokens -- twice the free-tier minute budget -- and it is also the
-    # wrong thing to score: relevance belongs to the passage that matched.
+    # Reranking no longer appears here. It ran on Groq, where its prompt had to be capped at
+    # 3,600 tokens to fit the minute budget (~7 of 20 candidates) and stalled the limiter for
+    # ~58s per call. It is now a local cross-encoder scoring each pair separately, so it
+    # consumes no tokens. Note the candidate cap cost little in practice -- see the measured
+    # note in euaia.retrieval.rerank; the win here is quota and latency, not ranking.
     #
-    # This must stay large enough to hold most of retrieve_candidates chunks at roughly
-    # chunk_target_tokens each, or candidates below the cutoff are silently dropped before
-    # the reranker ever sees them -- discovered when a chunk-packing rewrite quadrupled
-    # average chunk size (~99 -> ~400 tokens) without this being re-tuned to match, which
-    # left only ~6 of 20 fused candidates reaching the reranker. 3,600 is the largest value
-    # that still fits tests/test_budgets.py::TestDailyBudget's full-evaluation-run ceiling.
-    rerank_token_budget: int = 3_600
     # Total evidence handed to the answer model, after expanding survivors to articles.
     evidence_token_budget: int = 2_400
     # Output allowance for the answer call. Prompt + evidence + this must fit inside the

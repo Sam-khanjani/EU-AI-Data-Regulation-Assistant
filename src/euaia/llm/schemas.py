@@ -84,38 +84,6 @@ QUERY_ANALYSIS_SCHEMA = _schema(
 )
 
 
-# --------------------------------------------------------------------- rerank
-
-RERANK_SCHEMA = _schema(
-    "rerank",
-    {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["rankings"],
-        "properties": {
-            "rankings": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["label", "score"],
-                    "properties": {
-                        "label": {"type": "string"},
-                        "score": {
-                            "type": "integer",
-                            "description": (
-                                "0-10. 0 = irrelevant, 10 = directly and completely answers "
-                                "the question."
-                            ),
-                        },
-                    },
-                },
-            }
-        },
-    },
-)
-
-
 # --------------------------------------------------------------------- answer
 
 ANSWER_SCHEMA = _schema(

@@ -55,18 +55,10 @@ articles might be relevant; that is retrieval's job. Article numbers are bare st
 as "6", "50", "4a". Annexes are Roman numerals such as "III".
 """
 
-RERANK_SYSTEM = """\
-You score how well each numbered evidence block answers a question about the EU AI Act.
-
-Score each block 0-10:
-  10  directly and completely answers the question
-   7  contains a substantial part of the answer
-   4  related subject matter but does not answer the question
-   0  irrelevant
-
-Judge only what the text actually says. A provision that merely mentions the topic without
-addressing the question scores low. Score every block you are given, once each.
-"""
+# There is no rerank prompt any more. Reranking asked a model to score every candidate
+# 0-10 inside one prompt, which put its cost at the sum of all candidates -- ~9,000 tokens
+# for 20 of our chunks against an 8,000/min ceiling. It is now a local cross-encoder that
+# scores each (question, passage) pair on its own. See euaia.retrieval.rerank.
 
 ANSWER_SYSTEM = """\
 You answer questions about the EU AI Act (Regulation (EU) 2024/1689) using only the evidence
@@ -187,6 +179,3 @@ def assessment_user_prompt(
         prompt += REPAIR_NOTE.format(rejected=listed)
     return prompt
 
-
-def rerank_user_prompt(question: str, evidence_text: str) -> str:
-    return f"QUESTION\n{question}\n\nEVIDENCE BLOCKS\n\n{evidence_text}\n\nScore every block."

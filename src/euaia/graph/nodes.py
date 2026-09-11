@@ -127,16 +127,17 @@ def retrieve_evidence(
     return state
 
 
-def rerank_evidence(
-    state: QueryState, session: Session, client: GroqClient
-) -> QueryState:
+def rerank_evidence(state: QueryState, session: Session) -> QueryState:
     """Score the chunks, then expand the survivors to whole articles.
 
     Expansion happens *after* scoring so the reranker sees ~99-token passages rather than
     ~530-token articles -- both cheaper and a truer measure of relevance.
+
+    Scoring is local (:mod:`euaia.retrieval.rerank`), so this node spends no API tokens and
+    takes no rate-limiter budget. It no longer needs the Groq client.
     """
     state.note("reranking", f"scoring {len(state.candidates)} candidate passages")
-    result = rerank(client, state.question, state.candidates)
+    result = rerank(state.question, state.candidates)
     state.usage.add(result.usage)
     state.best_rerank_score = result.best_score
 
@@ -426,7 +427,7 @@ def run_pipeline(
         return state
 
     retrieve_evidence(state, session, embedder)
-    rerank_evidence(state, session, client)
+    rerank_evidence(state, session)
 
     if not evidence_is_sufficient(state):
         state.note("abstaining", "no sufficiently relevant provisions found")
