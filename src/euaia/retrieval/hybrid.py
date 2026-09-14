@@ -27,7 +27,7 @@ whole articles because a paragraph read alone is often meaningless.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -93,9 +93,13 @@ class RetrievedUnit:
     deeplink: str | None
     score: float
     matched_chunk_ids: list[int] = field(default_factory=list)
+    label: str = ""
+    """The handle the answer model cites (E1, E2, ...), assigned by :func:`label_units`."""
 
 
-_BASE_SELECT = """
+# What every retrieval leg starts from: chunks of active document versions, with their unit,
+# version and source. Each leg appends its own condition, the source filter and an ordering.
+_ACTIVE_CHUNKS = """
     SELECT c.id            AS chunk_id,
            c.text          AS chunk_text,
            c.token_count   AS chunk_tokens,
@@ -109,7 +113,11 @@ _BASE_SELECT = """
            dv.id           AS document_version_id,
            dv.version_label AS version_label,
            s.key           AS source_key
-"""
+    FROM chunk c
+    JOIN structural_unit su ON su.id = c.structural_unit_id
+    JOIN document_version dv ON dv.id = c.document_version_id
+    JOIN source s ON s.id = dv.source_id
+    WHERE dv.status = 'active'"""
 
 
 def dense_search(
@@ -120,13 +128,7 @@ def dense_search(
 ) -> list[Candidate]:
     """Nearest chunks by cosine distance over the HNSW index."""
     sql = text(
-        _BASE_SELECT
-        + """
-        FROM chunk c
-        JOIN structural_unit su ON su.id = c.structural_unit_id
-        JOIN document_version dv ON dv.id = c.document_version_id
-        JOIN source s ON s.id = dv.source_id
-        WHERE dv.status = 'active'"""
+        _ACTIVE_CHUNKS
         + _SOURCE_FILTER
         + """
         ORDER BY c.embedding <=> CAST(:embedding AS halfvec)
@@ -149,13 +151,8 @@ def fulltext_search(
 ) -> list[Candidate]:
     """Lexical search over the generated ``tsvector`` column."""
     sql = text(
-        _BASE_SELECT
+        _ACTIVE_CHUNKS
         + """
-        FROM chunk c
-        JOIN structural_unit su ON su.id = c.structural_unit_id
-        JOIN document_version dv ON dv.id = c.document_version_id
-        JOIN source s ON s.id = dv.source_id
-        WHERE dv.status = 'active'
           AND c.fts @@ websearch_to_tsquery('english', :query)"""
         + _SOURCE_FILTER
         + """
@@ -181,13 +178,8 @@ def structural_search(
         return []
 
     sql = text(
-        _BASE_SELECT
+        _ACTIVE_CHUNKS
         + """
-        FROM chunk c
-        JOIN structural_unit su ON su.id = c.structural_unit_id
-        JOIN document_version dv ON dv.id = c.document_version_id
-        JOIN source s ON s.id = dv.source_id
-        WHERE dv.status = 'active'
           AND (
                 (su.unit_type = 'article' AND su.unit_number = ANY(:articles))
              OR (su.unit_type = 'annex'   AND su.unit_number = ANY(:annexes))
@@ -362,6 +354,16 @@ def fit_token_budget(
 
     log.debug("evidence budget: kept %d/%d units, ~%d tokens", len(kept), len(units), spent)
     return kept
+
+
+def label_units(units: list[RetrievedUnit]) -> list[RetrievedUnit]:
+    """Assign E1, E2, ... in rank order.
+
+    Labels are deliberately opaque handles rather than database ids: the model never sees an
+    id it could invent a plausible-looking variant of, and a label we never issued is
+    trivially detected during verification.
+    """
+    return [replace(unit, label=f"E{i}") for i, unit in enumerate(units, start=1)]
 
 
 def citation_label(unit_type: str, unit_number: str | None, unit_path: str) -> str:

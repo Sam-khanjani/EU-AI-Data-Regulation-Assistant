@@ -104,7 +104,7 @@ def _doc() -> ParsedDocument:
         unit_number="27",
         page=None,
     )
-    return ParsedDocument(units=[article, paragraph, recital], root_tag="PDF")
+    return ParsedDocument(units=[article, paragraph, recital])
 
 
 class TestPagePersistence:

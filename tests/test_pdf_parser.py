@@ -122,7 +122,7 @@ class TestParagraphSplitting:
             _Line("2. Paragraph 1 shall not apply where the system", 18),
         ]
         counter = iter(range(100, 200))
-        units = _split_paragraphs(body, self._article(), lambda: next(counter))
+        units = _split_paragraphs(body, self._article(), counter)
 
         assert [u.unit_path for u in units] == ["CH_I/ART_6/PAR_1", "CH_I/ART_6/PAR_2"]
         assert [u.unit_number for u in units] == ["6(1)", "6(2)"]
@@ -134,14 +134,14 @@ class TestParagraphSplitting:
     def test_page_is_recorded_from_the_first_line(self):
         body = [_Line("1. First", 17), _Line("2. Second", 18)]
         counter = iter(range(100, 200))
-        units = _split_paragraphs(body, self._article(), lambda: next(counter))
+        units = _split_paragraphs(body, self._article(), counter)
         assert [u.page for u in units] == [17, 18]
 
     def test_article_without_numbered_paragraphs_yields_none(self):
         # The article unit already carries the full text.
         body = [_Line("Article 4", 11), _Line("Providers shall ensure literacy.", 11)]
         counter = iter(range(100, 200))
-        assert _split_paragraphs(body, self._article(), lambda: next(counter)) == []
+        assert _split_paragraphs(body, self._article(), counter) == []
 
     def test_lettered_points_do_not_start_a_paragraph(self):
         body = [
@@ -150,7 +150,7 @@ class TestParagraphSplitting:
             _Line("(b) the second condition", 17),
         ]
         counter = iter(range(100, 200))
-        units = _split_paragraphs(body, self._article(), lambda: next(counter))
+        units = _split_paragraphs(body, self._article(), counter)
         assert len(units) == 1
         assert "(b) the second condition" in units[0].text
 

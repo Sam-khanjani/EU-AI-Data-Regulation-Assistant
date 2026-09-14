@@ -19,8 +19,6 @@ from euaia.config import settings
 from euaia.db.models import CheckRun, Chunk, DocumentVersion, QueryLog, Source
 from euaia.graph.nodes import run_pipeline
 from euaia.graph.state import QueryState
-from euaia.ingest import sources
-from euaia.ingest.check import CheckResult, check_all
 from euaia.ingest.embedder import Embedder
 from euaia.llm.groq_client import GroqClient
 from euaia.verify.citations import VerifiedQuote
@@ -92,11 +90,60 @@ def ask(
     return view
 
 
+def answer_payload(view: AnswerView) -> dict[str, Any]:
+    """An answer as JSON: the ``/api/ask`` response.
+
+    The evaluation harness scores this same function's output when it runs in-process, so
+    its two run modes cannot drift apart.
+    """
+    return {
+        "question": view.question,
+        "verdict": view.verdict,
+        "summary": view.summary,
+        "claims": [
+            {
+                "text": claim.text,
+                "citations": [
+                    {
+                        "citation": c.citation_label,
+                        "quote": c.quote,
+                        "url": c.deeplink,
+                        "version": c.version_label,
+                    }
+                    for c in claim.citations
+                ],
+            }
+            for claim in view.claims
+        ],
+        "criteria": [
+            {
+                "criterion": c["criterion"],
+                "status": c["status"],
+                "explanation": c["explanation"],
+                "citations": [
+                    {"citation": q.citation_label, "quote": q.quote, "url": q.deeplink}
+                    for q in c["citations"]
+                ],
+            }
+            for c in view.criteria
+        ],
+        "abstain_reason": view.abstain_reason,
+        "unanswered_aspects": view.unanswered_aspects,
+        "follow_up_questions": view.follow_up_questions,
+        "coverage": view.coverage,
+        "quotes_total": view.quotes_total,
+        "quotes_dropped": view.quotes_dropped,
+        "latency_ms": view.latency_ms,
+        "tokens": view.tokens,
+        "waited_ms": view.waited_ms,
+        "sources": view.sources,
+        "query_log_id": view.query_log_id,
+    }
+
+
 def _to_view(state: QueryState) -> AnswerView:
     report = state.report
-    versions = {
-        lu.unit.document_version_id: lu.unit.version_label for lu in state.evidence
-    }
+    versions = {unit.document_version_id: unit.version_label for unit in state.evidence}
 
     view = AnswerView(
         question=state.question,
@@ -133,7 +180,7 @@ def _to_view(state: QueryState) -> AnswerView:
 
 
 def _criteria_view(state: QueryState) -> list[dict[str, Any]]:
-    versions = {lu.unit.document_version_id: lu.unit.version_label for lu in state.evidence}
+    versions = {unit.document_version_id: unit.version_label for unit in state.evidence}
     out = []
     for criterion in state.criteria:
         out.append(
@@ -211,11 +258,6 @@ def corpus_status(session: Session) -> list[dict[str, Any]]:
 
     out = []
     for source, version in rows:
-        chunks = session.scalar(
-            select(Chunk.id)
-            .where(Chunk.document_version_id == version.id)
-            .limit(1)
-        )
         chunk_count = session.query(Chunk).filter(
             Chunk.document_version_id == version.id
         ).count()
@@ -237,19 +279,10 @@ def corpus_status(session: Session) -> list[dict[str, Any]]:
                 "ingested_at": version.ingested_at,
                 "retrieved_at": version.retrieved_at,
                 "chunks": chunk_count,
-                "embedded": bool(chunks),
+                "embedded": chunk_count > 0,
                 "content_sha256": version.content_sha256,
                 "check_outcome": last_check.outcome if last_check else None,
                 "checked_at": last_check.ran_at if last_check else None,
             }
         )
     return out
-
-
-def check_now(session: Session) -> list[CheckResult]:
-    """Run change detection for every registered source and record the result.
-
-    A thin wrapper so the web route does not need to know about ``ingest.check`` or
-    ``ingest.sources`` directly.
-    """
-    return check_all(session, list(sources.ALL_SOURCES))

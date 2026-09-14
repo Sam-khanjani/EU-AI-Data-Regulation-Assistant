@@ -30,6 +30,9 @@ dependencies = [
     "google-genai>=0.3",
     # local reranking (cross-encoder, runs on CPU, no API quota)
     "sentence-transformers>=3.3",
+    # Declared directly only so [tool.uv.sources] below can route it: uv applies sources
+    # to direct dependencies, and torch otherwise arrives transitively.
+    "torch>=2.5",
     # graph
     "langgraph>=0.2.50",
     # utilities
@@ -67,3 +70,14 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "eval"]
 pythonpath = ["src"]
+
+# Linux (i.e. the Docker image) gets CPU-only torch. PyPI's Linux torch wheel depends on the
+# full CUDA stack -- several GB of nvidia-* libraries that do nothing without a GPU. Windows
+# and macOS wheels on PyPI are already CPU builds, so they are left alone.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

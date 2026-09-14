@@ -226,7 +226,7 @@ class TestQuotaDetection:
         ],
     )
     def test_recognises_provider_quota_errors(self, message):
-        assert embedding_cache._is_quota_error(RuntimeError(message))
+        assert embedding_cache.is_quota_error(RuntimeError(message))
 
     def test_other_errors_are_not_mistaken_for_quota(self):
-        assert not embedding_cache._is_quota_error(RuntimeError("connection reset"))
+        assert not embedding_cache.is_quota_error(RuntimeError("connection reset"))

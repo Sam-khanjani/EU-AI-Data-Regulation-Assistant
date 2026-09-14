@@ -112,9 +112,8 @@ def _is_retryable(exc: BaseException) -> bool:
 class CellarClient:
     """Synchronous CELLAR client.
 
-    Requests are issued sequentially, which keeps us inside CELLAR's concurrency guidance
-    by construction; ``settings.cellar_max_concurrency`` documents the ceiling for any
-    future parallel fetching.
+    Requests are issued sequentially, which keeps us inside CELLAR's guidance of fewer than
+    five concurrent requests by construction.
     """
 
     def __init__(self, client: httpx.Client | None = None) -> None:

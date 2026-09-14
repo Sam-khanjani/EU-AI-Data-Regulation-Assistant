@@ -80,6 +80,51 @@ Run the app, then open <http://localhost:8000>:
 uv run uvicorn euaia.api.main:app --reload
 ```
 
+## Running with Docker
+
+The whole stack — database, migrations, web app — runs under Docker Compose, with no local
+Python needed.
+
+```bash
+cp .env.example .env      # fill in GROQ_API_KEY, GOOGLE_API_KEY, POSTGRES_PASSWORD, ADMIN_PASSWORD
+docker compose up -d --build
+```
+
+Then open <http://127.0.0.1:8000>. On first start the app downloads the reranker weights
+(~2.3 GB) before it begins serving; follow it with `docker compose logs -f app`. Later starts
+reuse them from a volume.
+
+Ingest the corpus once (and again whenever you want to pick up a new consolidated version):
+
+```bash
+docker compose --profile tools run --rm ingest
+docker compose --profile tools run --rm ingest --skip-embeddings   # structure only, no API key
+```
+
+| Service | Role | Lifetime |
+|---|---|---|
+| `db` | Postgres 17 + pgvector, published on `127.0.0.1:5433` | long-running |
+| `migrate` | `alembic upgrade head` | runs once per `up`, then exits |
+| `app` | web UI and API on `127.0.0.1:8000` | long-running, waits for `migrate` |
+| `ingest` | fetch, parse, chunk, embed | on demand, `tools` profile only |
+
+Data lives in three named volumes: `euaia-pgdata` (database), `euaia-models` (reranker
+weights), `euaia-raw` (downloaded PDFs). `docker compose down` keeps them;
+`docker compose down -v` deletes all three, including the embedded corpus.
+
+Notes:
+
+- **`DATABASE_URL` in `.env` is ignored inside containers.** It points at `127.0.0.1:5433`,
+  the host side of the port mapping, which a container cannot reach. Compose builds the
+  in-network URL (`db:5432`) from `POSTGRES_PASSWORD` instead, so that value must be URL-safe.
+  Keep `DATABASE_URL` for running tools on the host.
+- **`.env` never enters the image** — it is excluded by `.dockerignore` and supplied at run
+  time.
+- **The image uses CPU-only PyTorch.** On Linux, PyPI's torch pulls the full CUDA stack;
+  `pyproject.toml` routes it to the CPU wheel index instead, keeping several GB of unused GPU
+  libraries out of the image.
+- Everything is published on `127.0.0.1` only. Nothing is reachable from other machines.
+
 ## Reranker model
 
 The reranker runs locally. Its weights are **not in this repository** — they download from the

@@ -98,7 +98,6 @@ class Completion:
     model: str
     usage: Usage = field(default_factory=Usage)
     finish_reason: str | None = None
-    truncated: bool = False
 
 
 class GroqClient:
@@ -266,17 +265,6 @@ class GroqClient:
             if limiter is not None:
                 limiter.note_retry_after(_retry_after_seconds(exc))
             raise
-
-
-_client: GroqClient | None = None
-
-
-def get_client() -> GroqClient:
-    """Process-wide client. Constructed lazily so importing does not require a key."""
-    global _client
-    if _client is None:
-        _client = GroqClient()
-    return _client
 
 
 def _retry_after_seconds(exc: RateLimitError, default: float = 20.0) -> float:

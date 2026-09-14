@@ -265,7 +265,7 @@ def run(
             session = SessionLocal()
             try:
                 view = service.ask(question, session, client_llm, embedder)
-                return _view_to_payload(view)
+                return service.answer_payload(view)
             finally:
                 session.close()
 
@@ -296,42 +296,6 @@ def run(
                 file=sys.stderr,
             )
     return results
-
-
-def _view_to_payload(view) -> dict[str, Any]:
-    """Match the JSON API shape so both run modes score identically."""
-    return {
-        "verdict": view.verdict,
-        "summary": view.summary,
-        "claims": [
-            {
-                "text": c.text,
-                "citations": [
-                    {"citation": q.citation_label, "quote": q.quote, "url": q.deeplink}
-                    for q in c.citations
-                ],
-            }
-            for c in view.claims
-        ],
-        "criteria": [
-            {
-                "criterion": c["criterion"],
-                "status": c["status"],
-                "explanation": c["explanation"],
-                "citations": [
-                    {"citation": q.citation_label, "quote": q.quote, "url": q.deeplink}
-                    for q in c["citations"]
-                ],
-            }
-            for c in view.criteria
-        ],
-        "coverage": view.coverage,
-        "quotes_total": view.quotes_total,
-        "quotes_dropped": view.quotes_dropped,
-        "latency_ms": view.latency_ms,
-        "tokens": view.tokens,
-        "waited_ms": view.waited_ms,
-    }
 
 
 def main(argv: list[str] | None = None) -> int:

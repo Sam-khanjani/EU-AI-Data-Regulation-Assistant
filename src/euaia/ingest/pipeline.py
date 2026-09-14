@@ -39,7 +39,7 @@ from euaia.db.session import (
 )
 from euaia.ingest import deeplinks, embedding_cache, pdf_parser, pdf_recitals, sources
 from euaia.ingest.cellar import CellarClient, Manifestation, VersionRef
-from euaia.ingest.chunker import TokenCounter, chunk_document
+from euaia.ingest.chunker import chunk_document
 from euaia.ingest.document import ParsedDocument
 from euaia.ingest.embedder import Embedder
 from euaia.ingest.sources import SourceSpec
@@ -118,12 +118,6 @@ def fetch_pdf_content(
     path.write_bytes(manifestation.content)
     log.info("Fetched %s as PDF (%d bytes)", ref.celex, len(manifestation.content))
     return manifestation, path
-
-
-def fetch_content(client: CellarClient, spec: SourceSpec, ref: VersionRef) -> Manifestation:
-    """Fetch this source's PDF, caching the bytes so re-runs do not re-hit CELLAR."""
-    manifestation, _ = fetch_pdf_content(client, ref)
-    return manifestation
 
 
 # One place decides which reader turns a source's bytes into units, so --estimate can never
@@ -209,7 +203,7 @@ def _ingest_source_locked(
 
     with CellarClient() as client:
         ref = resolve_target(client, spec)
-        manifestation = fetch_content(client, spec, ref)
+        manifestation, _ = fetch_pdf_content(client, ref)
 
     # Every reader here expects PDF bytes. Fail before handing them something else rather
     # than during parsing, where the error would name a symptom instead of the cause.
@@ -335,7 +329,7 @@ def _ingest_content(
 ) -> tuple[int, int]:
     """Parse, persist units, chunk and embed. Returns (unit count, chunk count)."""
     doc = parse_content(spec, manifestation)
-    drafts = chunk_document(doc, spec.doc_title or spec.title, TokenCounter(), spec.unit_types)
+    drafts = chunk_document(doc, spec.doc_title or spec.title, spec.unit_types)
 
     with session_scope() as session:
         version = _pending_version(session, spec.key, ref.celex)
@@ -696,17 +690,14 @@ def _fetch_pdf(keys: list[str]) -> int:
 
 def _estimate(keys: list[str]) -> int:
     """Report embedding cost per source without spending any quota."""
-    counter = TokenCounter()
     total_new = 0
     with CellarClient() as client:
         for key in keys:
             spec = sources.get(key)
             ref = resolve_target(client, spec)
-            manifestation = fetch_content(client, spec, ref)
+            manifestation, _ = fetch_pdf_content(client, ref)
             doc = parse_content(spec, manifestation)
-            drafts = chunk_document(
-                doc, spec.doc_title or spec.title, counter, spec.unit_types
-            )
+            drafts = chunk_document(doc, spec.doc_title or spec.title, spec.unit_types)
             estimate = embedding_cache.plan([d.text for d in drafts])
             total_new += estimate.to_embed
             print(f"{spec.key:24s} {estimate}")

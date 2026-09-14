@@ -45,14 +45,15 @@ class EmbeddingError(RuntimeError):
     pass
 
 
-def _is_quota_error(exc: BaseException) -> bool:
+def is_quota_error(exc: BaseException) -> bool:
+    """Whether the provider refused the call because the embedding quota is spent."""
     blob = str(exc)
     return "RESOURCE_EXHAUSTED" in blob or "exceeded your current quota" in blob
 
 
 def _should_retry(exc: BaseException) -> bool:
     """Retry transient failures only. A spent quota and a malformed response are final."""
-    return not _is_quota_error(exc) and not isinstance(exc, EmbeddingError)
+    return not is_quota_error(exc) and not isinstance(exc, EmbeddingError)
 
 
 class Embedder:
@@ -93,7 +94,7 @@ class Embedder:
             try:
                 out.extend(self._embed_batch(batch, task_type))
             except Exception as exc:  # noqa: BLE001
-                if len(batch) == 1 or _is_quota_error(exc):
+                if len(batch) == 1 or is_quota_error(exc):
                     # Never split a batch after a quota rejection. The free tier counts
                     # requests per item, so retrying sixteen items individually spends
                     # sixteen more of an allowance we have just been told is exhausted --

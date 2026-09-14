@@ -25,7 +25,9 @@ from sqlalchemy.orm import Session
 from euaia.api import service
 from euaia.config import settings
 from euaia.db.session import DatabaseUnavailable, db_session
+from euaia.ingest.check import check_all
 from euaia.ingest.embedder import EmbeddingError
+from euaia.ingest.sources import ALL_SOURCES
 from euaia.llm.groq_client import LLMError
 from euaia.retrieval import rerank as reranker
 
@@ -151,50 +153,7 @@ def api_ask(payload: dict, session: Db):
     if not question:
         return JSONResponse({"error": "question is required"}, status_code=400)
 
-    view = service.ask(question, session)
-    return {
-        "question": view.question,
-        "verdict": view.verdict,
-        "summary": view.summary,
-        "claims": [
-            {
-                "text": claim.text,
-                "citations": [
-                    {
-                        "citation": c.citation_label,
-                        "quote": c.quote,
-                        "url": c.deeplink,
-                        "version": c.version_label,
-                    }
-                    for c in claim.citations
-                ],
-            }
-            for claim in view.claims
-        ],
-        "criteria": [
-            {
-                "criterion": c["criterion"],
-                "status": c["status"],
-                "explanation": c["explanation"],
-                "citations": [
-                    {"citation": q.citation_label, "quote": q.quote, "url": q.deeplink}
-                    for q in c["citations"]
-                ],
-            }
-            for c in view.criteria
-        ],
-        "abstain_reason": view.abstain_reason,
-        "unanswered_aspects": view.unanswered_aspects,
-        "follow_up_questions": view.follow_up_questions,
-        "coverage": view.coverage,
-        "quotes_total": view.quotes_total,
-        "quotes_dropped": view.quotes_dropped,
-        "latency_ms": view.latency_ms,
-        "tokens": view.tokens,
-        "waited_ms": view.waited_ms,
-        "sources": view.sources,
-        "query_log_id": view.query_log_id,
-    }
+    return service.answer_payload(service.ask(question, session))
 
 
 @app.get("/status", response_class=HTMLResponse, dependencies=[Admin])
@@ -213,14 +172,14 @@ def status_check(request: Request, session: Db):
     admin auth.
 
     Per-source failures (CELLAR unreachable, SPARQL timeout) are already caught inside
-    ``check_now`` and recorded as a check outcome of ``error`` -- this except is only for
+    ``check_all`` and recorded as a check outcome of ``error`` -- this except is only for
     something more fundamental (e.g. no network at all), and keeps the table on screen with
     an inline banner rather than replacing it with a bare error, which would also strand the
     retry button.
     """
     error = None
     try:
-        service.check_now(session)
+        check_all(session, list(ALL_SOURCES))
     except Exception as exc:  # noqa: BLE001
         log.exception("Change detection failed")
         error = str(exc)

@@ -152,7 +152,6 @@ class Settings(BaseSettings):
     cellar_user_agent: str = (
         "euaia-research-assistant/0.1 (EU AI Act RAG prototype; contact: local dev)"
     )
-    cellar_max_concurrency: int = 4
     cellar_timeout_seconds: float = 60.0
 
     # --- Paths ---

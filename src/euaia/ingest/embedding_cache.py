@@ -40,7 +40,7 @@ from sqlalchemy import select
 from euaia.config import settings
 from euaia.db.models import EmbeddingCache
 from euaia.db.session import SessionLocal
-from euaia.ingest.embedder import Embedder
+from euaia.ingest.embedder import Embedder, is_quota_error
 
 log = logging.getLogger(__name__)
 
@@ -98,11 +98,6 @@ class QuotaExhausted(RuntimeError):
     def __init__(self, message: str, stats: EmbedStats) -> None:
         super().__init__(message)
         self.stats = stats
-
-
-def _is_quota_error(exc: BaseException) -> bool:
-    blob = str(exc)
-    return "RESOURCE_EXHAUSTED" in blob or "exceeded your current quota" in blob
 
 
 def _retry_delay(exc: BaseException) -> float | None:
@@ -232,7 +227,7 @@ def embed_documents(
         try:
             vectors = embedder.embed_documents(batch, batch_size=batch_size)
         except Exception as exc:
-            if not _is_quota_error(exc):
+            if not is_quota_error(exc):
                 raise
 
             delay = _retry_delay(exc)

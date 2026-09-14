@@ -37,10 +37,11 @@ from __future__ import annotations
 import io
 import logging
 import re
+from itertools import count
 
 import pdfplumber
 
-from euaia.ingest.document import OrdinalCounter, ParsedDocument, ParsedUnit
+from euaia.ingest.document import ParsedDocument, ParsedUnit
 
 # _Line and _join describe PDF text generally rather than anything about the outline; they
 # live in pdf_parser because that module needed them first.
@@ -171,7 +172,7 @@ def parse_recitals(pdf_bytes: bytes, *, expected: int | None = None) -> ParsedDo
             f"expected {expected} recitals, found {len(kept)} running 1..{kept[-1][1]}"
         )
 
-    counter = OrdinalCounter()
+    ordinals = count(1)
     units: list[ParsedUnit] = []
     for position, (index, number, page) in enumerate(kept):
         end = kept[position + 1][0] if position + 1 < len(kept) else len(body)
@@ -186,10 +187,10 @@ def parse_recitals(pdf_bytes: bytes, *, expected: int | None = None) -> ParsedDo
                 heading=None,
                 # The number leads the text, matching how a recital is quoted and cited.
                 text=f"({number})\n{text}",
-                ordinal=counter.next(),
+                ordinal=next(ordinals),
                 page=page,
             )
         )
 
     log.info("Parsed PDF preamble: %d recitals (1..%s)", len(units), units[-1].unit_number)
-    return ParsedDocument(units=units, root_tag="PDF-PREAMBLE")
+    return ParsedDocument(units=units)

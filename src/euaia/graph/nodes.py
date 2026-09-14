@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import replace
 
 from sqlalchemy.orm import Session
@@ -35,8 +36,14 @@ from euaia.ingest.embedder import Embedder
 from euaia.llm.groq_client import GroqClient, SchemaValidationFailed
 from euaia.llm.ratelimit import Limits, estimate_tokens
 from euaia.llm.schemas import ANSWER_SCHEMA, ASSESSMENT_SCHEMA, QUERY_ANALYSIS_SCHEMA
-from euaia.retrieval.hybrid import expand_to_units, fit_token_budget, retrieve
-from euaia.retrieval.rerank import label_units, rerank
+from euaia.retrieval.hybrid import (
+    RetrievedUnit,
+    expand_to_units,
+    fit_token_budget,
+    label_units,
+    retrieve,
+)
+from euaia.retrieval.rerank import rerank
 from euaia.verify.citations import Evidence, decide_verdict, verify_answer
 
 log = logging.getLogger(__name__)
@@ -153,7 +160,27 @@ def rerank_evidence(state: QueryState, session: Session) -> QueryState:
     return state
 
 
-def _fit_to_prompt_budget(evidence: list, state: QueryState) -> list:
+def _answer_prompts(
+    state: QueryState,
+    evidence: list[RetrievedUnit],
+    max_claims: int,
+    rejected: list[str] | None = None,
+) -> tuple[str, str]:
+    """System and user prompt for the answer call, or the criteria assessment's."""
+    assessment = state.intent == "applicability"
+    if assessment:
+        system = prompts.ASSESSMENT_SYSTEM
+    else:
+        system = prompts.ANSWER_SYSTEM.format(max_claims=max_claims)
+    user = prompts.user_prompt(
+        state.question, prompts.format_evidence(evidence), rejected, assessment=assessment
+    )
+    return system, user
+
+
+def _fit_to_prompt_budget(
+    evidence: list[RetrievedUnit], state: QueryState
+) -> list[RetrievedUnit]:
     """Trim evidence until the assembled prompt fits the minute budget.
 
     Sized against the *actual* prompt rather than an estimate: an earlier version budgeted
@@ -163,16 +190,6 @@ def _fit_to_prompt_budget(evidence: list, state: QueryState) -> list:
     Runs before the sufficiency gate so that a question whose evidence cannot fit abstains
     without spending an answer call on a prompt containing nothing.
     """
-    system = (
-        prompts.ASSESSMENT_SYSTEM
-        if state.intent == "applicability"
-        else prompts.ANSWER_SYSTEM.format(max_claims=settings.max_claims)
-    )
-    build_user = (
-        prompts.assessment_user_prompt
-        if state.intent == "applicability"
-        else prompts.answer_user_prompt
-    )
     # Leave room for the repair note, which is only added on a retry.
     # Sized against the budget the rate limiter will actually enforce, not the provider's
     # raw ceiling, and read from Limits so the two cannot drift apart.
@@ -182,9 +199,8 @@ def _fit_to_prompt_budget(evidence: list, state: QueryState) -> list:
         - estimate_tokens(prompts.REPAIR_NOTE)
     )
 
-    def fits(units: list) -> bool:
-        user = build_user(state.question, prompts.format_evidence(units), None)
-        return estimate_tokens(system, user) <= usable
+    def fits(units: list[RetrievedUnit]) -> bool:
+        return estimate_tokens(*_answer_prompts(state, units, settings.max_claims)) <= usable
 
     kept = list(evidence)
     while len(kept) > 1 and not fits(kept):
@@ -195,28 +211,26 @@ def _fit_to_prompt_budget(evidence: list, state: QueryState) -> list:
         # own. Truncating what the model *sees* is safe: quotes are still verified against
         # the unit's full text, so a quote copied from the visible part still passes and
         # the model cannot quote what it was not shown.
-        kept = [_truncate(kept[0], usable, system, build_user, state)]
+        kept = [_truncate(kept[0], fits)]
 
     if len(kept) < len(evidence):
         log.info("Trimmed evidence from %d to %d units", len(evidence), len(kept))
     # Relabel so the model is given a gap-free E1..En.
-    return [replace(lu, label=f"E{i}") for i, lu in enumerate(kept, start=1)]
+    return [replace(unit, label=f"E{i}") for i, unit in enumerate(kept, start=1)]
 
 
-def _truncate(labelled, usable: int, system: str, build_user, state: QueryState):
+def _truncate(
+    unit: RetrievedUnit, fits: Callable[[list[RetrievedUnit]], bool]
+) -> RetrievedUnit:
     """Shorten one unit's displayed text until the prompt fits, on a line boundary."""
-    lines = labelled.unit.text.splitlines()
+    lines = unit.text.splitlines()
     while len(lines) > 1:
         lines = lines[: max(1, int(len(lines) * 0.8))]
-        shortened = replace(labelled.unit, text="\n".join(lines))
-        candidate = replace(labelled, unit=shortened)
-        user = build_user(state.question, prompts.format_evidence([candidate]), None)
-        if estimate_tokens(system, user) <= usable:
-            log.warning(
-                "Truncated %s to fit the token budget", labelled.unit.citation_label
-            )
-            return candidate
-    return labelled
+        shortened = replace(unit, text="\n".join(lines))
+        if fits([shortened]):
+            log.warning("Truncated %s to fit the token budget", unit.citation_label)
+            return shortened
+    return unit
 
 
 def evidence_is_sufficient(state: QueryState) -> bool:
@@ -242,16 +256,16 @@ def _evidence_records(state: QueryState) -> list[Evidence]:
     """
     return [
         Evidence(
-            label=lu.label,
-            unit_id=lu.unit.unit_id,
-            unit_path=lu.unit.unit_path,
-            citation_label=lu.unit.citation_label,
-            text=lu.unit.text,
-            deeplink=lu.unit.deeplink,
-            document_version_id=lu.unit.document_version_id,
-            version_label=lu.unit.version_label,
+            label=unit.label,
+            unit_id=unit.unit_id,
+            unit_path=unit.unit_path,
+            citation_label=unit.citation_label,
+            text=unit.text,
+            deeplink=unit.deeplink,
+            document_version_id=unit.document_version_id,
+            version_label=unit.version_label,
         )
-        for lu in state.evidence
+        for unit in state.evidence
     ]
 
 
@@ -289,23 +303,13 @@ def _generate_once(
     max_claims: int,
 ) -> QueryState:
     state.note("generating", "drafting an answer from the retrieved provisions")
-    is_assessment = state.intent == "applicability"
-    system = (
-        prompts.ASSESSMENT_SYSTEM
-        if is_assessment
-        else prompts.ANSWER_SYSTEM.format(max_claims=max_claims)
-    )
-    build_user = (
-        prompts.assessment_user_prompt if is_assessment else prompts.answer_user_prompt
-    )
-
     # Evidence was already sized to the budget in rerank_evidence.
-    user = build_user(state.question, prompts.format_evidence(state.evidence), rejected)
+    system, user = _answer_prompts(state, state.evidence, max_claims, rejected)
 
     completion = client.structured(
         system=system,
         user=user,
-        response_format=ASSESSMENT_SCHEMA if is_assessment else ANSWER_SCHEMA,
+        response_format=ASSESSMENT_SCHEMA if state.intent == "applicability" else ANSWER_SCHEMA,
         model=settings.groq_model,
         # Sized so evidence + output stays inside the free tier's 8k tokens/minute.
         # The client raises rather than silently truncating if it does not.
@@ -331,12 +335,17 @@ def _claims_from_answer(state: QueryState) -> list[dict]:
     if state.intent == "applicability":
         return [
             {
-                "text": f"{c.get('criterion', '')} - {c.get('explanation', '')}".strip(" -"),
+                "text": _criterion_text(c),
                 "supporting_quotes": c.get("supporting_quotes", []),
             }
             for c in data.get("criteria", [])
         ]
     return data.get("claims", [])
+
+
+def _criterion_text(criterion: dict) -> str:
+    """A criterion as a claim -- also the key that matches verified claims back to it."""
+    return f"{criterion.get('criterion', '')} - {criterion.get('explanation', '')}".strip(" -")
 
 
 def verify(state: QueryState) -> QueryState:
@@ -393,8 +402,7 @@ def _verified_criteria(state: QueryState) -> list[dict]:
     surviving = {c.text: c for c in state.report.claims}
     out = []
     for criterion in (state.raw_answer or {}).get("criteria", []):
-        key = f"{criterion.get('criterion', '')} - {criterion.get('explanation', '')}".strip(" -")
-        verified = surviving.get(key)
+        verified = surviving.get(_criterion_text(criterion))
         if verified is None:
             continue
         out.append(

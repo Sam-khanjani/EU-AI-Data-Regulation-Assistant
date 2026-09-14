@@ -42,7 +42,7 @@ from dataclasses import dataclass, field, replace
 
 from euaia.config import settings
 from euaia.llm.groq_client import Usage
-from euaia.retrieval.hybrid import Candidate, RetrievedUnit
+from euaia.retrieval.hybrid import Candidate
 
 log = logging.getLogger(__name__)
 
@@ -124,42 +124,6 @@ class LabelledChunk:
     label: str
     candidate: Candidate
     score: float | None = None
-
-
-@dataclass(slots=True)
-class LabelledUnit:
-    """An expanded unit with the label the *answer* model cites."""
-
-    label: str
-    unit: RetrievedUnit
-    rerank_score: float | None = None
-
-    # Passthroughs so this can be handed straight to prompt formatting.
-    @property
-    def citation_label(self) -> str:
-        return self.unit.citation_label
-
-    @property
-    def heading(self) -> str | None:
-        return self.unit.heading
-
-    @property
-    def text(self) -> str:
-        return self.unit.text
-
-    @property
-    def version_label(self) -> str:
-        return self.unit.version_label
-
-
-def label_units(units: list[RetrievedUnit]) -> list[LabelledUnit]:
-    """Assign E1, E2, ... in rank order.
-
-    Labels are deliberately opaque handles rather than database ids: the model never sees an
-    id it could invent a plausible-looking variant of, and a label we never issued is
-    trivially detected during verification.
-    """
-    return [LabelledUnit(label=f"E{i}", unit=unit) for i, unit in enumerate(units, start=1)]
 
 
 @dataclass(slots=True)

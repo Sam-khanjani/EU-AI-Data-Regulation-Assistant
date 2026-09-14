@@ -166,15 +166,6 @@ class VerificationReport:
         """Rejected quotes, to name back to the model on its one retry."""
         return [r.quote for r in self.rejected]
 
-    def near_misses(self, threshold: float = 85.0) -> list[RejectedQuote]:
-        """Rejected quotes that were lexically close to the source.
-
-        Diagnostic only. A high score here means the model paraphrased rather than
-        invented -- a prompting problem, not a grounding failure. Nothing is ever accepted
-        on the strength of this score.
-        """
-        return [r for r in self.rejected if r.best_score >= threshold]
-
 
 def _trim_boundary_punctuation(text: str) -> str:
     """Drop leading/trailing punctuation, which never changes meaning at a quote boundary."""

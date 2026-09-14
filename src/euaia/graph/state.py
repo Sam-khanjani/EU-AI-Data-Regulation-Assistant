@@ -7,7 +7,6 @@ from typing import Any
 
 from euaia.llm.groq_client import Usage
 from euaia.retrieval.hybrid import Candidate, RetrievedUnit
-from euaia.retrieval.rerank import LabelledUnit
 from euaia.verify.citations import VerificationReport
 
 
@@ -42,7 +41,8 @@ class QueryState:
 
     retrieved: list[RetrievedUnit] = field(default_factory=list)
     """Survivors, expanded to whole articles."""
-    evidence: list[LabelledUnit] = field(default_factory=list)
+    evidence: list[RetrievedUnit] = field(default_factory=list)
+    """The survivors that fit the answer prompt, labelled E1..En."""
     best_rerank_score: float = 0.0
 
     # generate / verify
@@ -71,15 +71,14 @@ class QueryState:
     def document_version_ids(self) -> list[int]:
         """Versions that contributed evidence -- the provenance record for this answer."""
         seen: list[int] = []
-        for labelled in self.evidence:
-            vid = labelled.unit.document_version_id
-            if vid not in seen:
-                seen.append(vid)
+        for unit in self.evidence:
+            if unit.document_version_id not in seen:
+                seen.append(unit.document_version_id)
         return seen
 
     @property
     def retrieved_chunk_ids(self) -> list[int]:
         ids: list[int] = []
-        for labelled in self.evidence:
-            ids.extend(labelled.unit.matched_chunk_ids)
+        for unit in self.evidence:
+            ids.extend(unit.matched_chunk_ids)
         return ids

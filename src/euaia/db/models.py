@@ -175,20 +175,6 @@ class StructuralUnit(Base):
         back_populates="structural_unit", cascade="all, delete-orphan"
     )
 
-    @property
-    def citation_label(self) -> str:
-        """Human citation string, e.g. 'Article 6(2)' or 'Annex III'."""
-        pretty = {
-            "article": "Article",
-            "annex": "Annex",
-            "recital": "Recital",
-            "chapter": "Chapter",
-            "section": "Section",
-        }.get(self.unit_type)
-        if pretty and self.unit_number:
-            return f"{pretty} {self.unit_number}"
-        return self.unit_path
-
 
 class Chunk(Base):
     """An embedded retrieval unit (paragraph granularity)."""

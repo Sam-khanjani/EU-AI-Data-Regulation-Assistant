@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cache
 
 import tiktoken
 
@@ -41,6 +43,9 @@ log = logging.getLogger(__name__)
 # Unit types worth embedding. Chapters and sections are headings only -- their substance
 # lives in the articles beneath them, so embedding them would just add near-duplicates.
 _EMBEDDABLE = frozenset({"paragraph", "article", "recital", "annex"})
+
+# Tokens reserved between the breadcrumb and the body.
+_SEPARATOR_TOKENS = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,14 +62,15 @@ class ChunkDraft:
     """Body only, without the breadcrumb."""
 
     token_count: int
-    part: int = 0
-    """0-based index when one unit had to be split across several chunks."""
-
-    total_parts: int = 1
 
 
-class TokenCounter:
-    """Approximate token counting.
+@cache
+def _encoding() -> tiktoken.Encoding:
+    return tiktoken.get_encoding("cl100k_base")
+
+
+def count_tokens(text: str) -> int:
+    """Approximate token count.
 
     Gemini's tokenizer is not public, so this uses a GPT tokenizer as a stand-in. That is
     fine because we only need a *conservative* bound: the configured ceiling
@@ -72,12 +78,7 @@ class TokenCounter:
     headroom for tokenizer disagreement. The embedder still handles an over-length
     rejection from the API defensively.
     """
-
-    def __init__(self, encoding_name: str = "cl100k_base") -> None:
-        self._enc = tiktoken.get_encoding(encoding_name)
-
-    def count(self, text: str) -> int:
-        return len(self._enc.encode(text, disallowed_special=()))
+    return len(_encoding().encode(text, disallowed_special=()))
 
 
 def build_breadcrumb(doc_title: str, unit: ParsedUnit, by_path: dict[str, ParsedUnit]) -> str:
@@ -147,7 +148,6 @@ def _nearest_heading(unit: ParsedUnit, by_path: dict[str, ParsedUnit]) -> str | 
 def chunk_document(
     doc: ParsedDocument,
     doc_title: str,
-    counter: TokenCounter | None = None,
     include_unit_types: frozenset[str] | None = None,
 ) -> list[ChunkDraft]:
     """Produce embeddable chunks for a parsed document, in document order.
@@ -174,7 +174,6 @@ def chunk_document(
     cite superseded wording as if it were in force, so the original act contributes recitals
     only (consolidation drops those) and the consolidated act supplies all operative text.
     """
-    counter = counter or TokenCounter()
     allowed = _EMBEDDABLE if include_unit_types is None else (_EMBEDDABLE & include_unit_types)
     by_path = {u.unit_path: u for u in doc.units}
 
@@ -194,20 +193,18 @@ def chunk_document(
         children = paragraphs.get(unit.unit_path, []) if unit.unit_type == "article" else []
 
         if children and "paragraph" in allowed:
-            bodies = _pack([p.text for p in children], breadcrumb, counter)
+            bodies = _pack([p.text for p in children], breadcrumb)
         else:
-            bodies = _split_body(unit.text, breadcrumb, counter)
+            bodies = _split_body(unit.text, breadcrumb)
 
-        for i, body in enumerate(bodies):
+        for body in bodies:
             text = f"{breadcrumb}\n\n{body}"
             drafts.append(
                 ChunkDraft(
                     unit_path=unit.unit_path,
                     text=text,
                     body=body,
-                    token_count=counter.count(text),
-                    part=i,
-                    total_parts=len(bodies),
+                    token_count=count_tokens(text),
                 )
             )
 
@@ -223,7 +220,50 @@ def chunk_document(
     return drafts
 
 
-def _pack(parts: list[str], breadcrumb: str, counter: TokenCounter) -> list[str]:
+def _greedy_pack(
+    pieces: list[str],
+    *,
+    limit: int,
+    target: int,
+    joiner: str,
+    split_oversize: Callable[[str], list[str]],
+) -> list[str]:
+    """Join pieces, in order, into chunks of at most ``target`` tokens.
+
+    The one packing loop behind every splitter below. Pieces accumulate until the next one
+    would take the chunk past ``target``. A piece over ``limit`` on its own closes the chunk
+    in progress and is handed to ``split_oversize`` for a finer split.
+    """
+    out: list[str] = []
+    current: list[str] = []
+    used = 0
+    for piece in pieces:
+        tokens = count_tokens(piece)
+        if tokens > limit:
+            if current:
+                out.append(joiner.join(current))
+                current, used = [], 0
+            out.extend(split_oversize(piece))
+            continue
+        if current and used + tokens > target:
+            out.append(joiner.join(current))
+            current, used = [], 0
+        current.append(piece)
+        used += tokens
+    if current:
+        out.append(joiner.join(current))
+    return out
+
+
+def _body_budget(breadcrumb: str) -> int:
+    """Tokens left for a chunk's body once its breadcrumb and separator are counted."""
+    budget = settings.chunk_max_tokens - count_tokens(breadcrumb) - _SEPARATOR_TOKENS
+    if budget <= 0:
+        raise ValueError(f"breadcrumb alone exceeds the chunk budget: {breadcrumb!r}")
+    return budget
+
+
+def _pack(parts: list[str], breadcrumb: str) -> list[str]:
     """Pack sibling paragraphs into chunks of roughly ``chunk_target_tokens``.
 
     Paragraphs are kept whole and in order: a chunk boundary always falls between two
@@ -233,40 +273,46 @@ def _pack(parts: list[str], breadcrumb: str, counter: TokenCounter) -> list[str]
     A single paragraph larger than the budget is emitted alone and split by
     :func:`_split_body`, which breaks on line boundaries rather than mid-sentence.
     """
-    budget = settings.chunk_max_tokens - counter.count(breadcrumb) - 8
-    if budget <= 0:
-        raise ValueError(f"breadcrumb alone exceeds the chunk budget: {breadcrumb!r}")
-    target = min(settings.chunk_target_tokens, budget)
+    budget = _body_budget(breadcrumb)
+    packed = _greedy_pack(
+        parts,
+        limit=budget,
+        target=min(settings.chunk_target_tokens, budget),
+        joiner="\n",
+        split_oversize=lambda part: _split_body(part, breadcrumb),
+    )
+    return packed or [""]
 
-    out: list[str] = []
-    current: list[str] = []
-    current_tokens = 0
 
-    for part in parts:
-        cost = counter.count(part)
-        if cost > budget:
-            if current:
-                out.append("\n".join(current))
-                current, current_tokens = [], 0
-            out.extend(_split_body(part, breadcrumb, counter))
-            continue
+def _split_body(body: str, breadcrumb: str) -> list[str]:
+    """Split an over-long unit on line boundaries.
 
-        if current and current_tokens + cost > target:
-            out.append("\n".join(current))
-            current, current_tokens = [], 0
+    Lines here are *typeset* lines, since that is what the PDF readers emit, so a split can
+    land mid-sentence.
 
-        current.append(part)
-        current_tokens += cost
-
-    if current:
-        out.append("\n".join(current))
-    return out or [""]
+    That cannot break citation: verification runs against ``structural_unit.text``, not
+    against the chunk, and ``normalize_text`` collapses all whitespace before matching. The
+    cost is retrieval quality -- a chunk cut mid-sentence is a slightly worse thing for the
+    reranker to score -- not correctness.
+    """
+    budget = _body_budget(breadcrumb)
+    if count_tokens(body) <= budget:
+        return [body]
+    # A single line longer than the whole budget -- an unusually long typeset line, or a
+    # provision set as one unbroken run -- is split further by sentence.
+    return _greedy_pack(
+        body.split("\n"),
+        limit=budget,
+        target=min(settings.chunk_target_tokens, budget),
+        joiner="\n",
+        split_oversize=lambda line: _split_long_line(line, budget),
+    )
 
 
 _SENTENCE_END = re.compile(r"(?<=[.;:])\s+")
 
 
-def _split_long_line(line: str, budget: int, counter: TokenCounter) -> list[str]:
+def _split_long_line(line: str, budget: int) -> list[str]:
     """Split one over-long line, preferring sentence boundaries, then words.
 
     Splitting inside a sentence is acceptable here in a way it would not be elsewhere,
@@ -278,89 +324,22 @@ def _split_long_line(line: str, budget: int, counter: TokenCounter) -> list[str]
     Leaving the line whole is not an option -- anything over the embedding model's
     2,048-token input limit is rejected outright, losing the provision entirely.
     """
-    pieces = _SENTENCE_END.split(line)
-    out: list[str] = []
-    current: list[str] = []
-    current_tokens = 0
-
-    for piece in pieces:
-        cost = counter.count(piece)
-        if cost > budget:
-            if current:
-                out.append(" ".join(current))
-                current, current_tokens = [], 0
-            out.extend(_split_words(piece, budget, counter))
-            continue
-        if current and current_tokens + cost > budget:
-            out.append(" ".join(current))
-            current, current_tokens = [], 0
-        current.append(piece)
-        current_tokens += cost
-
-    if current:
-        out.append(" ".join(current))
-    return out or [line]
+    pieces = _greedy_pack(
+        _SENTENCE_END.split(line),
+        limit=budget,
+        target=budget,
+        joiner=" ",
+        split_oversize=lambda sentence: _split_words(sentence, budget),
+    )
+    return pieces or [line]
 
 
-def _split_words(text: str, budget: int, counter: TokenCounter) -> list[str]:
-    """Last resort: pack words up to the budget. Only reached by pathological input."""
-    out: list[str] = []
-    current: list[str] = []
-    current_tokens = 0
-    for word in text.split():
-        cost = max(1, counter.count(word))
-        if current and current_tokens + cost > budget:
-            out.append(" ".join(current))
-            current, current_tokens = [], 0
-        current.append(word)
-        current_tokens += cost
-    if current:
-        out.append(" ".join(current))
-    return out or [text]
+def _split_words(text: str, budget: int) -> list[str]:
+    """Last resort: pack words up to the budget. Only reached by pathological input.
 
-
-def _split_body(body: str, breadcrumb: str, counter: TokenCounter) -> list[str]:
-    """Split an over-long unit on line boundaries.
-
-    Lines here are *typeset* lines, since that is what the PDF readers emit, so a split can
-    land mid-sentence.
-
-    That cannot break citation: verification runs against ``structural_unit.text``, not
-    against the chunk, and ``normalize_text`` collapses all whitespace before matching. The
-    cost is retrieval quality -- a chunk cut mid-sentence is a slightly worse thing for the
-    reranker to score -- not correctness.
+    A single word over the budget becomes a chunk of its own.
     """
-    budget = settings.chunk_max_tokens - counter.count(breadcrumb) - 8  # separator slack
-    if budget <= 0:
-        raise ValueError(f"breadcrumb alone exceeds the chunk budget: {breadcrumb!r}")
-
-    if counter.count(body) <= budget:
-        return [body]
-
-    target = min(settings.chunk_target_tokens, budget)
-    out: list[str] = []
-    current: list[str] = []
-    current_tokens = 0
-
-    for line in body.split("\n"):
-        line_tokens = counter.count(line)
-
-        # A single line longer than the whole budget: an unusually long typeset line, or a
-        # provision set as one unbroken run.
-        if line_tokens > budget:
-            if current:
-                out.append("\n".join(current))
-                current, current_tokens = [], 0
-            out.extend(_split_long_line(line, budget, counter))
-            continue
-
-        if current and current_tokens + line_tokens > target:
-            out.append("\n".join(current))
-            current, current_tokens = [], 0
-
-        current.append(line)
-        current_tokens += line_tokens
-
-    if current:
-        out.append("\n".join(current))
-    return out
+    words = _greedy_pack(
+        text.split(), limit=budget, target=budget, joiner=" ", split_oversize=lambda w: [w]
+    )
+    return words or [text]

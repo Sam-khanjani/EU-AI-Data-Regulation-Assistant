@@ -36,25 +36,7 @@ class ParsedDocument:
     units: list[ParsedUnit]
     """Flat list in document order; hierarchy is expressed by ``parent_path``."""
 
-    root_tag: str
     consolidation_date: str | None = None
-    start_date: str | None = None
 
     def by_type(self, unit_type: str) -> list[ParsedUnit]:
         return [u for u in self.units if u.unit_type == unit_type]
-
-
-class OrdinalCounter:
-    """Monotonic document-order ordinal.
-
-    Shared by both parsers rather than reimplemented in each. Two independent counters is
-    exactly the kind of duplication that drifts -- one starting at 0, the other at 1 -- into a
-    document order that is subtly wrong and that nothing directly tests.
-    """
-
-    def __init__(self) -> None:
-        self._n = 0
-
-    def next(self) -> int:
-        self._n += 1
-        return self._n

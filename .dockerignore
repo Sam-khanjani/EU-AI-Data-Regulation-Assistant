@@ -1,0 +1,42 @@
+# Secrets. Configuration reaches the container through docker-compose, never the image --
+# an image layer is permanent and anyone who can pull it can read what was copied in.
+.env
+.env.*
+!.env.example
+
+# Local environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Version control and editor/tool state
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Downloaded source documents (fetched from CELLAR at ingest time, persisted in a volume)
+data/raw/
+
+# Model weights, if a cache was ever pointed inside the project (mounted as a volume instead)
+.cache/
+models/
+*.safetensors
+*.onnx
+*.bin
+
+# Not needed to run the app
+tests/
+eval/
+*.log
+eval_report.json
+docker-compose*.yml
+Dockerfile

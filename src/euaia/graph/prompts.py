@@ -152,28 +152,25 @@ def format_evidence(units) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
-def answer_user_prompt(
-    question: str, evidence_text: str, rejected: list[str] | None = None
+def user_prompt(
+    question: str,
+    evidence_text: str,
+    rejected: list[str] | None = None,
+    *,
+    assessment: bool = False,
 ) -> str:
-    prompt = (
-        f"QUESTION\n{question}\n\n"
-        f"EVIDENCE\n\n{evidence_text}\n\n"
-        "Answer the question using only the evidence above."
-    )
-    if rejected:
-        listed = "\n".join(f"  - {q!r}" for q in rejected)
-        prompt += REPAIR_NOTE.format(rejected=listed)
-    return prompt
+    """The user turn: the question, the evidence, and on a retry the quotes that failed.
 
-
-def assessment_user_prompt(
-    question: str, evidence_text: str, rejected: list[str] | None = None
-) -> str:
-    prompt = (
-        f"THE USER'S SITUATION\n{question}\n\n"
-        f"EVIDENCE\n\n{evidence_text}\n\n"
-        "Set out the criteria the Regulation applies. Do not state a verdict."
-    )
+    An answer and a criteria assessment differ only in how the question is framed and what
+    is asked of it.
+    """
+    if assessment:
+        heading = "THE USER'S SITUATION"
+        instruction = "Set out the criteria the Regulation applies. Do not state a verdict."
+    else:
+        heading = "QUESTION"
+        instruction = "Answer the question using only the evidence above."
+    prompt = f"{heading}\n{question}\n\nEVIDENCE\n\n{evidence_text}\n\n{instruction}"
     if rejected:
         listed = "\n".join(f"  - {q!r}" for q in rejected)
         prompt += REPAIR_NOTE.format(rejected=listed)

@@ -1,3 +1,23 @@
+# Everything shares one image; the command decides what a container does.
+#
+#   docker compose up -d --build                        database + migrations + web app
+#   docker compose --profile tools run --rm ingest      fetch, parse, embed the corpus
+#
+# See "Running with Docker" in README.md.
+
+x-app: &app
+  build: .
+  image: euaia-app
+  env_file: .env
+  environment:
+    # Inside the compose network the database is `db:5432`. The DATABASE_URL in .env points
+    # at 127.0.0.1:5433 -- the host-side port mapping, which a container cannot reach -- so it
+    # is overridden here. POSTGRES_PASSWORD must be URL-safe (or percent-encoded) to embed.
+    DATABASE_URL: postgresql+psycopg://euaia:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/euaia
+  volumes:
+    - euaia-models:/models      # reranker weights, downloaded once
+    - euaia-raw:/app/data/raw   # source PDFs fetched from CELLAR
+
 services:
   db:
     image: pgvector/pgvector:pg17
@@ -16,5 +36,55 @@ services:
       timeout: 5s
       retries: 10
 
+  # Runs once and exits. The app waits for it to succeed, so it never serves against a
+  # schema older than its code.
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    <<: *app
+    container_name: euaia-app
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).status != 200)"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      # The first start downloads the reranker weights before serving; allow for it.
+      start_period: 15m
+
+  # On demand only (`--profile tools`): a one-shot job, not a service that should stay up.
+  ingest:
+    <<: *app
+    # entrypoint, not command: arguments given to `docker compose run` replace `command`, so
+    # this lets `run --rm ingest --skip-embeddings` append flags to the pipeline.
+    entrypoint: ["python", "-m", "euaia.ingest.pipeline"]
+    command: []
+    profiles: ["tools"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   euaia-pgdata:
+  euaia-models:
+  euaia-raw:

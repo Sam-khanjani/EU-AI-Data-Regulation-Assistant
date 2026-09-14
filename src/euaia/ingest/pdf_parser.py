@@ -44,14 +44,15 @@ from __future__ import annotations
 import io
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import count
 
 import pdfplumber
 from pdfminer.pdfdocument import PDFDocument
 from pdfminer.pdfparser import PDFParser
 
-from euaia.ingest.document import OrdinalCounter, ParsedDocument, ParsedUnit
+from euaia.ingest.document import ParsedDocument, ParsedUnit
 from euaia.ingest.pdf_outline import OutlineEntry, read_outline
 
 log = logging.getLogger(__name__)
@@ -168,7 +169,7 @@ def _locate(lines: list[_Line], entry: OutlineEntry, after: int) -> int | None:
 
 
 def _split_paragraphs(
-    body: list[_Line], article: ParsedUnit, next_ordinal: Callable[[], int]
+    body: list[_Line], article: ParsedUnit, ordinals: Iterator[int]
 ) -> list[ParsedUnit]:
     """Numbered paragraphs of an article: the granularity we embed at.
 
@@ -197,7 +198,7 @@ def _split_paragraphs(
                 unit_path=f"{article.unit_path}/PAR_{number}",
                 heading=None,
                 text=text,
-                ordinal=next_ordinal(),
+                ordinal=next(ordinals),
                 parent_path=article.unit_path,
                 page=chunk[0].page,
             )
@@ -246,7 +247,7 @@ def parse(pdf_bytes: bytes) -> ParsedDocument:
     if not located:
         raise PdfParseError("outline present but no heading matched the page text")
 
-    counter = OrdinalCounter()
+    ordinals = count(1)
     units: list[ParsedUnit] = []
     # Path context by outline depth: an article sits under a section where one exists and
     # under the chapter otherwise, and the outline's own nesting already says which.
@@ -268,7 +269,7 @@ def parse(pdf_bytes: bytes) -> ParsedDocument:
             unit_path=f"{parent.unit_path}/{prefix}" if parent else prefix,
             heading=entry.heading,
             text=_join(body),
-            ordinal=counter.next(),
+            ordinal=next(ordinals),
             parent_path=parent.unit_path if parent else None,
             page=entry.page,
         )
@@ -276,7 +277,7 @@ def parse(pdf_bytes: bytes) -> ParsedDocument:
         stack.append((entry.level, unit))
 
         if entry.unit_type == "article":
-            units.extend(_split_paragraphs(body, unit, counter.next))
+            units.extend(_split_paragraphs(body, unit, ordinals))
 
     log.info(
         "Parsed PDF: %d units (%d articles, %d paragraphs, %d annexes)",
@@ -285,8 +286,4 @@ def parse(pdf_bytes: bytes) -> ParsedDocument:
         sum(1 for u in units if u.unit_type == "paragraph"),
         sum(1 for u in units if u.unit_type == "annex"),
     )
-    return ParsedDocument(
-        units=units,
-        root_tag="PDF",
-        consolidation_date=consolidation_date,
-    )
+    return ParsedDocument(units=units, consolidation_date=consolidation_date)
