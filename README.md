@@ -45,7 +45,7 @@ resolve it. The determination depends on facts only the user has.
 Both providers are used on free tiers, which are tight enough to shape the design directly —
 chunking, caching, and prompt sizing are all built to fit inside them. Details on that, and on
 why quote-matching is exact rather than fuzzy, are in the code's module docstrings
-(`src/euaia/verify/citations.py`, `src/euaia/ingest/embedding_cache.py`).
+(`src/euaia/verify/citations.py`, `src/euaia/ingest/embeddings.py`).
 
 Reranking runs locally rather than through an API. An LLM reranker scores every candidate
 inside a single prompt, so its cost is the sum of all candidates — 20 chunks is ~9,000 tokens

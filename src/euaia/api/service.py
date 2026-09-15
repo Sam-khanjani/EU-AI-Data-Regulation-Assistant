@@ -19,7 +19,7 @@ from euaia.config import settings
 from euaia.db.models import CheckRun, Chunk, DocumentVersion, QueryLog, Source
 from euaia.graph.nodes import run_pipeline
 from euaia.graph.state import QueryState
-from euaia.ingest.embedder import Embedder
+from euaia.ingest.embeddings import Embedder
 from euaia.llm.groq_client import GroqClient
 from euaia.verify.citations import VerifiedQuote
 

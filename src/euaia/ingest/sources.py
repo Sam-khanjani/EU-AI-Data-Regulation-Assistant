@@ -61,7 +61,7 @@ class SourceSpec:
         Recitals from the preamble text. The as-adopted act carries only 14 bookmarks
         (annexes alone), so there is no outline to read; the reader works from the enacting
         formula, the typographic size of the hanging number, and the 1..N run instead. See
-        :mod:`euaia.ingest.pdf_recitals`.
+        :func:`euaia.ingest.pdf.parse_recitals`.
     """
 
     unit_types: frozenset[str] | None = None

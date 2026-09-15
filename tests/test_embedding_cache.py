@@ -16,10 +16,10 @@ from sqlalchemy import text
 
 from euaia.config import settings
 from euaia.db.session import SessionLocal, engine
-from euaia.ingest import embedding_cache
-from euaia.ingest.embedding_cache import (
+from euaia.ingest import embeddings
+from euaia.ingest.embeddings import (
     QuotaExhausted,
-    embed_documents,
+    embed_with_cache,
     plan,
     text_hash,
 )
@@ -90,15 +90,15 @@ def texts(n: int, marker: str = MARKER) -> list[str]:
 class TestReuse:
     def test_first_run_embeds_everything(self):
         fake = FakeEmbedder()
-        vectors, stats = embed_documents(texts(10), fake)
+        vectors, stats = embed_with_cache(texts(10), fake)
         assert len(vectors) == 10
         assert stats.computed == 10 and stats.reused == 0
         assert fake.items_embedded == 10
 
     def test_second_run_spends_nothing(self):
-        embed_documents(texts(10), FakeEmbedder())
+        embed_with_cache(texts(10), FakeEmbedder())
         fake = FakeEmbedder()
-        vectors, stats = embed_documents(texts(10), fake)
+        vectors, stats = embed_with_cache(texts(10), fake)
         assert fake.items_embedded == 0, "re-embedding identical text wastes daily quota"
         assert stats.reused == 10 and stats.computed == 0
         assert len(vectors) == 10
@@ -107,27 +107,27 @@ class TestReuse:
         # The cache column is halfvec (fp16), same as chunk.embedding, so a round trip
         # loses a little precision. Both paths end up storing the same fp16 value, and
         # cosine similarity is unaffected at this magnitude.
-        first, _ = embed_documents(texts(4), FakeEmbedder())
-        second, _ = embed_documents(texts(4), FakeEmbedder())
+        first, _ = embed_with_cache(texts(4), FakeEmbedder())
+        second, _ = embed_with_cache(texts(4), FakeEmbedder())
         for a, b in zip(first, second, strict=True):
             assert a == pytest.approx(b, abs=1e-3)
 
     def test_only_changed_text_costs_anything(self):
         # The amendment case: most provisions are byte-identical, a few changed.
-        embed_documents(texts(10), FakeEmbedder())
+        embed_with_cache(texts(10), FakeEmbedder())
         changed = texts(10)
         changed[3] = "amended provision with entirely new wording"
         changed[7] = "another amended provision"
 
         fake = FakeEmbedder()
-        _, stats = embed_documents(changed, fake)
+        _, stats = embed_with_cache(changed, fake)
         assert fake.items_embedded == 2, "a re-consolidation must only pay for what moved"
         assert stats.reused == 8
 
     def test_duplicate_text_within_one_run_costs_once(self):
         fake = FakeEmbedder()
         repeated = ["identical chunk text " + MARKER] * 5
-        vectors, stats = embed_documents(repeated, fake)
+        vectors, stats = embed_with_cache(repeated, fake)
         assert fake.items_embedded == 1
         assert len(vectors) == 5
         assert all(v == vectors[0] for v in vectors)
@@ -135,19 +135,19 @@ class TestReuse:
 
     def test_order_is_preserved(self):
         items = texts(6)
-        vectors, _ = embed_documents(items, FakeEmbedder())
+        vectors, _ = embed_with_cache(items, FakeEmbedder())
         # Re-request in a different order and confirm the mapping follows the input.
         shuffled = list(reversed(items))
-        reordered, _ = embed_documents(shuffled, FakeEmbedder())
+        reordered, _ = embed_with_cache(shuffled, FakeEmbedder())
         for a, b in zip(reordered, reversed(vectors), strict=True):
             assert a == pytest.approx(b, abs=1e-3)
 
 
 class TestModelIsolation:
     def test_a_different_model_does_not_reuse_vectors(self):
-        embed_documents(texts(5), FakeEmbedder(model="fake-embed-001"))
+        embed_with_cache(texts(5), FakeEmbedder(model="fake-embed-001"))
         other = FakeEmbedder(model="fake-embed-002")
-        _, stats = embed_documents(texts(5), other)
+        _, stats = embed_with_cache(texts(5), other)
         assert other.items_embedded == 5, (
             "vectors from a different model live in a different space and must not be reused"
         )
@@ -159,38 +159,38 @@ class TestResumability:
         # Fail after 32 items: two batches of 16 succeed and are committed.
         fake = FakeEmbedder(fail_after=32)
         with pytest.raises(QuotaExhausted):
-            embed_documents(texts(80), fake)
+            embed_with_cache(texts(80), fake)
 
         # A later run reuses what the failed run managed to compute.
         resumed = FakeEmbedder()
-        _, stats = embed_documents(texts(80), resumed)
+        _, stats = embed_with_cache(texts(80), resumed)
         assert stats.reused == 32, "committed batches must survive the failure"
         assert resumed.items_embedded == 48
 
     def test_quota_error_is_reported_not_raised_raw(self):
         fake = FakeEmbedder(fail_after=0)
         with pytest.raises(QuotaExhausted, match="quota exhausted"):
-            embed_documents(texts(20), fake)
+            embed_with_cache(texts(20), fake)
 
 
 class TestSpendCap:
     def test_cap_stops_before_spending_anything(self):
         fake = FakeEmbedder()
         with pytest.raises(QuotaExhausted, match="max-embeddings"):
-            embed_documents(texts(50), fake, max_new=10)
+            embed_with_cache(texts(50), fake, max_new=10)
         assert fake.items_embedded == 0, "the cap must refuse up front, not part way"
 
     def test_cap_allows_a_run_that_fits(self):
         fake = FakeEmbedder()
-        _, stats = embed_documents(texts(10), fake, max_new=10)
+        _, stats = embed_with_cache(texts(10), fake, max_new=10)
         assert stats.computed == 10
 
     def test_cap_counts_only_new_work(self):
-        embed_documents(texts(40), FakeEmbedder())
+        embed_with_cache(texts(40), FakeEmbedder())
         fake = FakeEmbedder()
         # 40 cached + 5 new: a cap of 5 must be enough.
         items = texts(40) + ["brand new chunk " + MARKER + str(i) for i in range(5)]
-        _, stats = embed_documents(items, fake, max_new=5)
+        _, stats = embed_with_cache(items, fake, max_new=5)
         assert stats.reused == 40 and stats.computed == 5
 
 
@@ -202,7 +202,7 @@ class TestPlan:
         assert fake.items_embedded == 0, "estimating must not spend quota"
 
     def test_reflects_cached_entries(self):
-        embed_documents(texts(12), FakeEmbedder())
+        embed_with_cache(texts(12), FakeEmbedder())
         estimate = plan(texts(12), FakeEmbedder())
         assert estimate.cached == 12 and estimate.to_embed == 0
 
@@ -226,7 +226,7 @@ class TestQuotaDetection:
         ],
     )
     def test_recognises_provider_quota_errors(self, message):
-        assert embedding_cache.is_quota_error(RuntimeError(message))
+        assert embeddings.is_quota_error(RuntimeError(message))
 
     def test_other_errors_are_not_mistaken_for_quota(self):
-        assert not embedding_cache.is_quota_error(RuntimeError("connection reset"))
+        assert not embeddings.is_quota_error(RuntimeError("connection reset"))

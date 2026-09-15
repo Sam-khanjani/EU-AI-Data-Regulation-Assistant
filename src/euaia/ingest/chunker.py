@@ -36,7 +36,7 @@ from functools import cache
 import tiktoken
 
 from euaia.config import settings
-from euaia.ingest.document import ParsedDocument, ParsedUnit
+from euaia.ingest.pdf import ParsedDocument, ParsedUnit
 
 log = logging.getLogger(__name__)
 

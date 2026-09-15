@@ -24,8 +24,8 @@ from sqlalchemy import text as sql_text
 from euaia.config import settings
 from euaia.db.models import Chunk, DocumentVersion, Source, StructuralUnit
 from euaia.db.session import SessionLocal, engine
-from euaia.ingest import deeplinks
-from euaia.ingest.pdf_parser import parse
+from euaia.ingest.cellar import deeplink
+from euaia.ingest.pdf import parse_consolidated
 from euaia.verify.normalize import normalize_text
 
 CORPUS_KEY = "pytest-live-corpus"
@@ -75,7 +75,7 @@ def _vec(text: str) -> list[float]:
 @pytest.fixture(scope="module")
 def corpus():
     """Load real Article 5/6/26/50 and Annex III text under an isolated source key."""
-    doc = parse(RAW.read_bytes())
+    doc = parse_consolidated(RAW.read_bytes())
     session = SessionLocal()
     try:
         _purge(session)
@@ -118,7 +118,7 @@ def corpus():
                 text=unit.text,
                 text_normalized=normalize_text(unit.text),
                 ordinal=unit.ordinal,
-                eurlex_deeplink=deeplinks.build(
+                eurlex_deeplink=deeplink(
                     CELEX, unit.unit_type, unit.unit_number, unit.unit_path
                 ),
             )

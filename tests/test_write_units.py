@@ -15,7 +15,7 @@ from sqlalchemy import text
 from euaia.db.models import DocumentVersion, Source, StructuralUnit
 from euaia.db.session import SessionLocal, engine
 from euaia.ingest.cellar import VersionRef
-from euaia.ingest.document import ParsedDocument, ParsedUnit
+from euaia.ingest.pdf import ParsedDocument, ParsedUnit
 from euaia.ingest.pipeline import _write_units
 
 TEST_SOURCE_KEY = "pytest-write-units"

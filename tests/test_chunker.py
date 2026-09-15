@@ -13,7 +13,7 @@ import pytest
 
 from euaia.config import settings
 from euaia.ingest.chunker import build_breadcrumb, chunk_document, count_tokens
-from euaia.ingest.document import ParsedDocument, ParsedUnit
+from euaia.ingest.pdf import ParsedDocument, ParsedUnit
 
 TITLE = "Regulation (EU) 2024/1689 (AI Act)"
 

@@ -255,7 +255,7 @@ def run(
     else:
         from euaia.api import service
         from euaia.db.session import SessionLocal
-        from euaia.ingest.embedder import Embedder
+        from euaia.ingest.embeddings import Embedder
         from euaia.llm.groq_client import GroqClient
 
         client_llm = GroqClient()

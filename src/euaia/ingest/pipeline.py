@@ -8,6 +8,9 @@ bug here fails loudly rather than silently serving half a corpus.
 
 Nothing is ever overwritten. Re-ingesting produces a new ``document_version`` row, which is
 what makes "which version produced this answer?" answerable months later.
+
+Change detection lives here too (:func:`check_all`). It asks CELLAR which version is current
+and compares it with the active one, without fetching or ingesting anything.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from euaia.config import settings
-from euaia.db.models import Chunk, DocumentVersion, IngestionRun, Source, StructuralUnit
+from euaia.db.models import CheckRun, Chunk, DocumentVersion, IngestionRun, Source, StructuralUnit
 from euaia.db.session import (
     UNAVAILABLE_MESSAGE,
     DatabaseUnavailable,
@@ -37,11 +40,11 @@ from euaia.db.session import (
     ensure_extensions,
     session_scope,
 )
-from euaia.ingest import deeplinks, embedding_cache, pdf_parser, pdf_recitals, sources
-from euaia.ingest.cellar import CellarClient, Manifestation, VersionRef
+from euaia.ingest import embeddings, pdf, sources
+from euaia.ingest.cellar import CellarClient, CellarError, Manifestation, VersionRef, deeplink
 from euaia.ingest.chunker import chunk_document
-from euaia.ingest.document import ParsedDocument
-from euaia.ingest.embedder import Embedder
+from euaia.ingest.embeddings import Embedder
+from euaia.ingest.pdf import ParsedDocument
 from euaia.ingest.sources import SourceSpec
 from euaia.verify.normalize import normalize_text
 
@@ -123,8 +126,8 @@ def fetch_pdf_content(
 # One place decides which reader turns a source's bytes into units, so --estimate can never
 # measure a different parse from the one that will actually run.
 _PARSERS: dict[str, Callable[[bytes], ParsedDocument]] = {
-    "pdf_outline": pdf_parser.parse,
-    "pdf_preamble": pdf_recitals.parse_recitals,
+    "pdf_outline": pdf.parse_consolidated,
+    "pdf_preamble": pdf.parse_recitals,
 }
 
 
@@ -253,7 +256,7 @@ def _ingest_source_locked(
             spec, ref, manifestation,
             skip_embeddings=skip_embeddings, max_embeddings=max_embeddings,
         )
-    except embedding_cache.QuotaExhausted as exc:
+    except embeddings.QuotaExhausted as exc:
         # Not a bug and not worth a stack trace: the vectors computed before the stop are
         # cached, so the next run resumes rather than restarting.
         with session_scope() as session:
@@ -343,7 +346,7 @@ def _ingest_content(
         # Goes through the cache rather than the embedder directly: the free tier allows
         # 1,000 items a day and the corpus is 779, so re-embedding unchanged text would
         # make routine re-ingestion impossible.
-        vectors, embed_stats = embedding_cache.embed_documents(
+        vectors, embed_stats = embeddings.embed_with_cache(
             [d.text for d in drafts], embedder, max_new=max_embeddings
         )
         log.info("Embeddings: %s", embed_stats)
@@ -423,7 +426,7 @@ def _write_units(
                 text_normalized=normalize_text(unit.text),
                 ordinal=unit.ordinal,
                 page=unit.page,
-                eurlex_deeplink=deeplinks.build(
+                eurlex_deeplink=deeplink(
                     ref.celex, unit.unit_type, unit.unit_number, unit.unit_path
                 ),
             )
@@ -509,6 +512,87 @@ def _mark_failed(session: Session, source_key: str, celex: str, error: str) -> N
         run.error = error[:4000]
 
 
+# ------------------------------------------------------------- change detection
+# Has EUR-Lex published a newer version of a tracked source?
+#
+# A check never fetches or parses anything. It is one SPARQL query, where ingestion is a full
+# fetch/parse/chunk/embed run that spends real quota. An administrator (or, later, a
+# scheduler) needs to ask "has this changed?" on a cheap, frequent cadence without paying for
+# a re-ingest just to find out the answer is no.
+#
+# The signal is the resolved CELEX, not a content hash: a consolidated act that changes gets a
+# new CELEX of its own (``CellarClient`` docstring), so comparing it to the active version's
+# CELEX is exactly the check-vs-ingest split -- fetching the document body is not required to
+# know whether one exists.
+
+@dataclass(slots=True)
+class CheckResult:
+    source_key: str
+    outcome: str
+    """'unchanged' | 'new_version' | 'error'."""
+
+    active_celex: str | None
+    latest_celex: str | None
+    detail: str = ""
+
+
+def check_source(session: Session, spec: SourceSpec, client: CellarClient) -> CheckResult:
+    """Resolve the version CELLAR currently serves and compare it to what's active.
+
+    Writes one ``check_run`` row regardless of outcome -- a failed check (CELLAR down, a
+    SPARQL timeout) is itself a fact worth recording, not just logging, since a string of
+    failed checks is what should eventually page someone rather than a single one.
+    """
+    source = ensure_source(session, spec)
+    active = session.scalar(
+        select(DocumentVersion).where(
+            DocumentVersion.source_id == source.id,
+            DocumentVersion.status == "active",
+        )
+    )
+    active_celex = active.celex if active else None
+
+    try:
+        ref = resolve_target(client, spec)
+    except CellarError as exc:
+        result = CheckResult(
+            source_key=spec.key,
+            outcome="error",
+            active_celex=active_celex,
+            latest_celex=None,
+            detail=str(exc),
+        )
+    else:
+        outcome = "unchanged" if ref.celex == active_celex else "new_version"
+        result = CheckResult(
+            source_key=spec.key,
+            outcome=outcome,
+            active_celex=active_celex,
+            latest_celex=ref.celex,
+            detail=f"latest is {ref.label}" if ref.doc_date else "",
+        )
+
+    session.add(
+        CheckRun(
+            source_id=source.id,
+            outcome=result.outcome,
+            detail={
+                "active_celex": result.active_celex,
+                "latest_celex": result.latest_celex,
+                "note": result.detail,
+            },
+        )
+    )
+    session.flush()
+    return result
+
+
+def check_all(session: Session, specs: list[SourceSpec]) -> list[CheckResult]:
+    """Check every given source against one shared CELLAR client and connection."""
+    with CellarClient() as client:
+        return [check_source(session, spec, client) for spec in specs]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Ingest an official document into the corpus.")
     parser.add_argument(
@@ -584,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args)
     except (DatabaseUnavailable, OperationalError):
         # Both land here: session_scope()/db_session() raise DatabaseUnavailable, but
-        # embedding_cache opens its own sessions directly and can still surface the raw
+        # the embedding cache opens its own sessions directly and can still surface the raw
         # driver error -- catching both means the message is clean either way, without
         # having to convert every SessionLocal() call site individually.
         print(f"error: {UNAVAILABLE_MESSAGE}", file=sys.stderr)
@@ -599,8 +683,6 @@ def _run(args: argparse.Namespace) -> int:
         return _estimate(args.source or [s.key for s in sources.ALL_SOURCES])
 
     if args.check:
-        from euaia.ingest.check import check_all  # deferred: avoids a circular import
-
         specs = [sources.get(k) for k in (args.source or [s.key for s in sources.ALL_SOURCES])]
         with session_scope() as session:
             for result in check_all(session, specs):
@@ -698,7 +780,7 @@ def _estimate(keys: list[str]) -> int:
             manifestation, _ = fetch_pdf_content(client, ref)
             doc = parse_content(spec, manifestation)
             drafts = chunk_document(doc, spec.doc_title or spec.title, spec.unit_types)
-            estimate = embedding_cache.plan([d.text for d in drafts])
+            estimate = embeddings.plan([d.text for d in drafts])
             total_new += estimate.to_embed
             print(f"{spec.key:24s} {estimate}")
 

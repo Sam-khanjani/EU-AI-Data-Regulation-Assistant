@@ -25,8 +25,8 @@ from sqlalchemy.orm import Session
 from euaia.api import service
 from euaia.config import settings
 from euaia.db.session import DatabaseUnavailable, db_session
-from euaia.ingest.check import check_all
-from euaia.ingest.embedder import EmbeddingError
+from euaia.ingest.embeddings import EmbeddingError
+from euaia.ingest.pipeline import check_all
 from euaia.ingest.sources import ALL_SOURCES
 from euaia.llm.groq_client import LLMError
 from euaia.retrieval import rerank as reranker

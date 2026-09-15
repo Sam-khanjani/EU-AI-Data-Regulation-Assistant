@@ -16,7 +16,7 @@ from sqlalchemy import text as sql_text
 from euaia.db.models import CheckRun, DocumentVersion, Source
 from euaia.db.session import engine, session_scope
 from euaia.ingest.cellar import CellarError, VersionRef
-from euaia.ingest.check import check_all, check_source
+from euaia.ingest.pipeline import check_all, check_source
 from euaia.ingest.sources import SourceSpec
 
 TEST_KEY = "pytest-check-source"
@@ -187,7 +187,7 @@ def test_check_all_shares_one_client(monkeypatch):
         def __exit__(self, *exc):
             return False
 
-    monkeypatch.setattr("euaia.ingest.check.CellarClient", lambda: _FakeCtx())
+    monkeypatch.setattr("euaia.ingest.pipeline.CellarClient", lambda: _FakeCtx())
     with session_scope() as session:
         results = check_all(session, [_spec(TEST_KEY), _spec(TEST_KEY_2)])
     assert len(results) == 2

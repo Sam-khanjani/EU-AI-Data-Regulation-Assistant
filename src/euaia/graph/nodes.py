@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 from euaia.config import settings
 from euaia.graph import prompts
 from euaia.graph.state import QueryState
-from euaia.ingest.embedder import Embedder
+from euaia.ingest.embeddings import Embedder
 from euaia.llm.groq_client import GroqClient, SchemaValidationFailed
 from euaia.llm.ratelimit import Limits, estimate_tokens
 from euaia.llm.schemas import ANSWER_SCHEMA, ASSESSMENT_SCHEMA, QUERY_ANALYSIS_SCHEMA

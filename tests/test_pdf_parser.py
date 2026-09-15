@@ -11,19 +11,20 @@ from __future__ import annotations
 import pytest
 
 from euaia.config import settings
-from euaia.ingest.document import ParsedUnit
-from euaia.ingest.pdf_outline import classify, clean_title
-from euaia.ingest.pdf_parser import (
+from euaia.ingest.pdf import (
     _MARKER_LINE,
     _RUNNING_HEADER,
     MAX_MISSING_FRACTION,
     SOFT_HYPHEN,
+    ParsedUnit,
     PdfParseError,
     _join,
     _Line,
     _locate,
     _split_paragraphs,
-    parse,
+    classify,
+    clean_title,
+    parse_consolidated,
 )
 
 PDF_NAME = "02024R1689-20260727.ENG.pdf"
@@ -38,7 +39,7 @@ _needs_pdf = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def doc():
-    return parse((settings.raw_data_dir / PDF_NAME).read_bytes())
+    return parse_consolidated((settings.raw_data_dir / PDF_NAME).read_bytes())
 
 
 class TestTitleCleaning:
@@ -158,7 +159,7 @@ class TestParagraphSplitting:
 class TestHeadingLocation:
     @staticmethod
     def _entry(number: str, page: int, unit_type: str = "article"):
-        from euaia.ingest.pdf_outline import OutlineEntry
+        from euaia.ingest.pdf import OutlineEntry
 
         return OutlineEntry(
             level=3,
@@ -280,14 +281,14 @@ class TestPartialParseIsRefused:
         return (settings.raw_data_dir / PDF_NAME).read_bytes()
 
     def test_losing_every_heading_raises(self, monkeypatch):
-        monkeypatch.setattr("euaia.ingest.pdf_parser._locate", lambda *a, **k: None)
+        monkeypatch.setattr("euaia.ingest.pdf._locate", lambda *a, **k: None)
         with pytest.raises(PdfParseError, match="did not match a heading line"):
-            parse(self._pdf())
+            parse_consolidated(self._pdf())
 
     def test_the_error_names_the_scale_of_the_loss(self, monkeypatch):
-        monkeypatch.setattr("euaia.ingest.pdf_parser._locate", lambda *a, **k: None)
+        monkeypatch.setattr("euaia.ingest.pdf._locate", lambda *a, **k: None)
         with pytest.raises(PdfParseError) as exc:
-            parse(self._pdf())
+            parse_consolidated(self._pdf())
         message = str(exc.value)
         assert "162 of 162" in message
         assert "layout has probably changed" in message
@@ -302,8 +303,8 @@ class TestPartialParseIsRefused:
             calls["n"] += 1
             return None if calls["n"] == 1 else real(lines, entry, after)
 
-        monkeypatch.setattr("euaia.ingest.pdf_parser._locate", flaky)
-        doc = parse(self._pdf())
+        monkeypatch.setattr("euaia.ingest.pdf._locate", flaky)
+        doc = parse_consolidated(self._pdf())
         assert len(doc.by_type("article")) == 119
 
     def test_the_threshold_is_strict(self):
@@ -354,6 +355,6 @@ class TestKnownTextLayerDamage:
         assert "greater than 102 5" in article_51.text, (
             "expected the known-bad extraction; if this now reads 10^25 or similar, the "
             "text layer or the library has improved -- update the test and the warning in "
-            "pdf_parser's module docstring"
+            "the consolidated-act section of ingest/pdf.py"
         )
         assert "10²⁵" not in article_51.text

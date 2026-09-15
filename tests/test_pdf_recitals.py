@@ -9,14 +9,14 @@ from __future__ import annotations
 import pytest
 
 from euaia.config import settings
-from euaia.ingest.pdf_parser import PdfParseError
-from euaia.ingest.pdf_recitals import (
+from euaia.ingest.pdf import (
     _EMPTY_REF,
     _NOISE,
-    BODY_SIZE,
-    MARKER_SIZE,
     MIN_RECITALS,
-    _classify,
+    RECITAL_BODY_SIZE,
+    RECITAL_MARKER_SIZE,
+    PdfParseError,
+    _recital_line,
     parse_recitals,
 )
 
@@ -35,22 +35,22 @@ def _words(*pairs: tuple[str, float]) -> list[dict]:
 class TestRecitalVersusFootnote:
     def test_a_recital_line_is_a_small_number_then_body_prose(self):
         # The whole trick: [8.5, 9.6, 9.6, ...] -- a hanging number introducing prose.
-        words = _words(("(27)", MARKER_SIZE), ("While", BODY_SIZE), ("the", BODY_SIZE))
-        assert _classify(words) == ("27", "While the")
+        words = _words(("(27)", RECITAL_MARKER_SIZE), ("While", RECITAL_BODY_SIZE), ("the", RECITAL_BODY_SIZE))
+        assert _recital_line(words) == ("27", "While the")
 
     def test_a_footnote_line_is_uniformly_small_and_yields_nothing(self):
         # [8.5, 8.5, 8.5, ...]. Same '(1)' token, different line -- and this is the case that
         # a sequence-only rule gets wrong, taking a footnote as the next recital.
-        words = _words(("(1)", MARKER_SIZE), ("OJ", MARKER_SIZE), ("C", MARKER_SIZE))
-        assert _classify(words) == (None, "")
+        words = _words(("(1)", RECITAL_MARKER_SIZE), ("OJ", RECITAL_MARKER_SIZE), ("C", RECITAL_MARKER_SIZE))
+        assert _recital_line(words) == (None, "")
 
     def test_a_continuation_line_is_body_with_no_number(self):
-        words = _words(("risk-based", BODY_SIZE), ("approach", BODY_SIZE))
-        assert _classify(words) == (None, "risk-based approach")
+        words = _words(("risk-based", RECITAL_BODY_SIZE), ("approach", RECITAL_BODY_SIZE))
+        assert _recital_line(words) == (None, "risk-based approach")
 
     def test_a_number_at_body_size_does_not_start_a_recital(self):
-        words = _words(("(27)", BODY_SIZE), ("While", BODY_SIZE))
-        assert _classify(words)[0] is None
+        words = _words(("(27)", RECITAL_BODY_SIZE), ("While", RECITAL_BODY_SIZE))
+        assert _recital_line(words)[0] is None
 
 
 class TestNoise:
