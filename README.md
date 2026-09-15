@@ -43,7 +43,7 @@ still work on one self-contained question. Conversations are saved per user.
 | Embeddings | Gemini `gemini-embedding-001` |
 | Generation | Groq `openai/gpt-oss-120b`, structured output |
 | Query analysis | Groq `openai/gpt-oss-20b` |
-| Reranking | `BAAI/bge-reranker-v2-m3` cross-encoder, **run locally** |
+| Reranking | NVIDIA `llama-nemotron-rerank-vl-1b-v2` via OpenRouter, or `BAAI/bge-reranker-v2-m3` run locally (set in `config.py`) |
 | Orchestration | LangGraph |
 | Chat | Chainlit, with sign-in and saved conversations |
 | Admin / API | FastAPI + Jinja2 + HTMX |
@@ -53,18 +53,19 @@ chunking, caching, and prompt sizing are all built to fit inside them. Details o
 why quote-matching is exact rather than fuzzy, are in the code's module docstrings
 (`src/euaia/verify/citations.py`, `src/euaia/ingest/embeddings.py`).
 
-Reranking runs locally rather than through an API. An LLM reranker scores every candidate
-inside a single prompt, so its cost is the sum of all candidates — 20 chunks is ~9,000 tokens
-against a free-tier ceiling of 8,000 per minute, which made a full candidate set impossible to
-score and forced the rate limiter to idle ~58s before each call. A cross-encoder scores each
+Reranking uses a cross-encoder, not an LLM. An LLM reranker scores every candidate inside a
+single prompt, so its cost is the sum of all candidates — 20 chunks is ~9,000 tokens against a
+free-tier ceiling of 8,000 per minute, which made a full candidate set impossible to score and
+forced the rate limiter to idle ~58s before each call. A cross-encoder scores each
 `(question, passage)` pair independently: no shared budget, no per-minute ceiling, no tokens.
+It runs hosted on OpenRouter by default, or locally; see [Reranker model](#reranker-model).
 
 ## Setup
 
 Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), and Docker.
 
 ```bash
-cp .env.example .env      # then fill in GROQ_API_KEY and GOOGLE_API_KEY
+cp .env.example .env      # then fill in GROQ_API_KEY, GOOGLE_API_KEY and OPENROUTER_API_KEY
 uv sync --extra dev
 docker compose up -d db
 uv run alembic upgrade head
@@ -100,15 +101,15 @@ The whole stack — database, migrations, chat, admin dashboard — runs under D
 with no local Python needed.
 
 ```bash
-cp .env.example .env      # fill in GROQ_API_KEY, GOOGLE_API_KEY, POSTGRES_PASSWORD, ADMIN_PASSWORD,
-                          # CHAT_USERS and CHAINLIT_AUTH_SECRET
+cp .env.example .env      # fill in GROQ_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY,
+                          # POSTGRES_PASSWORD, ADMIN_PASSWORD, CHAT_USERS, CHAINLIT_AUTH_SECRET
 docker compose up -d --build
 ```
 
 Then open the chat at <http://127.0.0.1:8001>, or the admin dashboard at
-<http://127.0.0.1:8000/status>. On first start the chat downloads the reranker weights
-(~2.3 GB) before it begins serving; follow it with `docker compose logs -f chat`. Later starts
-reuse them from a volume.
+<http://127.0.0.1:8000/status>. With the local reranker selected, the chat downloads its
+weights (~2.3 GB) on first start before it begins serving; follow it with
+`docker compose logs -f chat`. Later starts reuse them from a volume.
 
 Ingest the corpus once (and again whenever you want to pick up a new consolidated version):
 
@@ -170,7 +171,21 @@ The admin dashboard uses its own, separate login: `ADMIN_USERNAME` and `ADMIN_PA
 
 ## Reranker model
 
-The reranker runs locally. Its weights are **not in this repository** — they download from the
+Which reranker scores the evidence is chosen in **`src/euaia/config.py`**, and only there —
+`.env` and environment variables cannot change it, because it decides what every answer is
+grounded in:
+
+```python
+rerank_provider = "openrouter"   # or "local"
+openrouter_rerank_model = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"
+rerank_model = "BAAI/bge-reranker-v2-m3"   # used when rerank_provider = "local"
+```
+
+After changing it, restart the chat (`python -m euaia.chat`), or with Docker rebuild the image,
+since `config.py` is part of it: `docker compose up -d --build chat app`.
+
+The default is the hosted model, described under
+[Hosted reranking](#hosted-reranking-openrouter) below. The local model's weights are **not in this repository** — they download from the
 Hugging Face Hub the first time they are needed and are then cached on disk. Nothing here
 needs a Hugging Face account or token; the default model is public and Apache-2.0.
 
@@ -190,17 +205,16 @@ a user's first question:
 uv run python -c "from euaia.retrieval.rerank import load_model; load_model()"
 ```
 
-The app also pre-loads the model at startup (`lifespan` in `api/main.py`), so `uvicorn` is
-ready before it accepts traffic. If the download fails, startup still succeeds and the error
-surfaces on the first question instead.
+The chat also pre-loads the model at startup (`on_app_startup` in `chat/app.py`), so it is
+ready before the first question. If the download fails, startup still succeeds and the error
+surfaces on the first question instead. The admin app loads it only if `/api/ask` is called.
 
 ### Choosing a different model
 
-Any `sentence-transformers` cross-encoder works. Set `RERANK_MODEL` (or `rerank_model`
-in `.env`) — no code change:
+Any `sentence-transformers` cross-encoder works. Set `rerank_model` in `config.py`:
 
-```bash
-RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+```python
+rerank_model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 ```
 
 **Scored against `eval/questions.yaml`.** All 29 questions, candidate pools built by
@@ -230,7 +244,7 @@ v2-m3    1. Article 5    2. Article 5    3. Recital 28  4. Recital 31  -> eviden
 Under MiniLM the two recitals consume the evidence budget, Article 5 (~3,000 tokens) no longer
 fits, and the assistant abstains for want of any provision listing a prohibited practice.
 `tests/test_pipeline_live.py` fails on exactly this, so **re-run it after changing
-`RERANK_MODEL`** — ranking metrics alone will not catch this class of regression.
+`rerank_model`** — ranking metrics alone will not catch this class of regression.
 
 Note that scoring all 20 candidates is worth less than it looks: restricted to the top 8 by
 retrieval rank, evidence survival is unchanged (90% for v2-m3). RRF ordering already puts the
@@ -246,6 +260,52 @@ and `should_abstain` questions overlap completely — `nonexistent-article` scor
 MiniLM while the genuine `chatbot-applicability` question scores 0.0002. Rank survives where
 score does not (those questions still have MRR 1.0). Use the reranker to order evidence, never
 to decide whether to answer; citation verification and the coverage gate do that.
+
+### Hosted reranking (OpenRouter)
+
+With `rerank_provider = "openrouter"` (the default) the candidates are scored by a hosted model,
+all 20 in one request per question, using `OPENROUTER_API_KEY` from `.env`. The model is
+`openrouter_rerank_model` in `config.py`. No local weights are loaded. If OpenRouter fails, the question fails with a clear message rather
+than silently falling back to a different ranking.
+
+**Measured on 2026-09-15** with `eval/rerankers.py`: the 26 evaluation questions that reach
+reranking, 20 candidates each, **identical frozen pools** for every model, relevance judged
+from `expected_articles` / `expected_annexes`. These numbers come from a different pool
+collection and recall definition than the local-model table above, so compare within this
+table only:
+
+| Reranker | P@1 | R@4 | nDCG@4 | MRR | Recitals in top 4 | Worst refusal score | Time per question |
+|---|---|---|---|---|---|---|---|
+| `bge-reranker-v2-m3` *(local default)* | 0.45 | 0.81 | 0.54 | 0.68 | 1.85 | 0.748 | 27.9 s |
+| `bge-reranker-base` | 0.30 | 0.77 | 0.43 | 0.56 | 1.95 | 0.981 | 8.3 s |
+| `ms-marco-MiniLM-L-6-v2` | 0.40 | 0.74 | 0.50 | 0.62 | 1.80 | 0.997 | 0.8 s |
+| **Nemotron Rerank VL 1B v2** *(OpenRouter)* | **0.55** | **0.88** | **0.57** | **0.75** | **1.55** | **0.137** | **0.66 s** |
+
+*Worst refusal score* is the highest score any should-refuse question received: lower means the
+score separates answerable from unanswerable questions better. Nemotron is the only model that
+kept every answerable question above `rerank_min_score`.
+
+**End to end the picture is mixed.** Both providers ran the full pipeline on the same 14
+questions, the ones where their rankings disagreed most:
+
+| | Local v2-m3 | Nemotron |
+|---|---|---|
+| Correct answer/refusal decision | 12 / 14 | 12 / 14 |
+| Citation recall | **68%** | 56% |
+| Quotes verified | 45 / 46 | **51 / 51** |
+| Wins | `article-50-transparency`, `definitions-ai-system`, `penalties` | `high-risk-classification`, `cv-screening-applicability`, `risk-management-and-accuracy`, `chatbot-applicability` |
+| Whole answer, "deployer obligations" in the chat | 22.8 s | **4.0 s** |
+
+Nemotron's losses are all questions naming one provision, and all have the same cause: it
+ranks a neighbouring provision first (Article 26 above Article 50, Recital 12 above Article 3,
+Articles 100–101 above Article 99). Evidence is packed into `evidence_token_budget` in rank
+order, so the right provision no longer fits and the answer cites the wrong one or abstains.
+Top-rank mistakes cost more than the ranking metrics suggest.
+
+The free tier allows **50 requests a day** across all free models, so hosted reranking also
+caps the whole application at about 50 questions a day; once they are used up, questions fail
+with a 429 message until the limit resets. Switch `rerank_provider` to `"local"` for unlimited
+use at ~30 s of ranking per question.
 
 ### Offline / air-gapped
 

@@ -1,8 +1,15 @@
-"""Application settings, loaded from environment / .env."""
+"""Application settings, loaded from environment / .env.
+
+Almost everything here can be overridden from ``.env``. The exceptions are declared as
+``ClassVar`` -- which reranker scores the evidence -- and are changed by editing this file:
+they decide what the assistant answers from, so they live in version control rather than
+drifting per machine.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar, Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,6 +26,8 @@ class Settings(BaseSettings):
     # --- Credentials ---
     groq_api_key: str = ""
     google_api_key: str = ""
+    # Only needed when rerank_provider = "openrouter".
+    openrouter_api_key: str = ""
 
     # --- Admin auth ---
     # Gates /status and /status/check (corpus contents, change detection -- not meant for
@@ -62,7 +71,23 @@ class Settings(BaseSettings):
     retrieve_candidates: int = 20
     rerank_keep: int = 4
 
-    # --- Reranking (local cross-encoder, no API quota) ---
+    # --- Reranking ---
+    # Set here only: ClassVar keeps these out of .env and environment variables, so the
+    # choice of reranker is changed by editing this file (and rebuilding the Docker image).
+    #
+    # Where candidates are scored. "local" runs the cross-encoder `rerank_model` below on
+    # this machine: no quota, no network, ~30s per question on CPU. "openrouter" sends the
+    # same (question, passage) pairs to `openrouter_rerank_model` in one request: about a
+    # second, but a network dependency with its own quota -- the free tier allows 50 requests
+    # a day across all free models, and every question needs one. On failure a question
+    # fails; there is no fallback to the other provider. Measured side by side in README.md
+    # ("Hosted reranking") with eval/rerankers.py.
+    rerank_provider: ClassVar[Literal["local", "openrouter"]] = "openrouter"
+    openrouter_rerank_model: ClassVar[str] = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_timeout_seconds: float = 60.0
+
+    # --- Local reranking (cross-encoder, no API quota) ---
     # Apache-2.0. Downloaded from the Hugging Face Hub on first use and cached under
     # HF_HOME; see "Reranker model" in README.md. The default is ~2.3 GB at fp32.
     #
@@ -92,8 +117,8 @@ class Settings(BaseSettings):
     # So v2-m3 stays the default despite costing 35x the compute: it buys correctness on
     # the most basic question in the evaluation set, not a point of nDCG.
     # bge-reranker-base is dominated on every axis and is recorded only as measured.
-    # Switch with RERANK_MODEL; no code change.
-    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # Used when rerank_provider = "local". Set here only, like rerank_provider.
+    rerank_model: ClassVar[str] = "BAAI/bge-reranker-v2-m3"
     # Cap on (query + passage) tokens per pair.
     #
     # v2-m3 accepts up to 8,194 positions, but the window is what costs: it measured 68s at

@@ -27,6 +27,7 @@ from euaia.graph.state import Progress, Turn
 from euaia.ingest.embeddings import EmbeddingError
 from euaia.llm.groq_client import LLMError
 from euaia.retrieval import rerank as reranker
+from euaia.retrieval.rerank import RerankerUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ CHAT_SCHEMA = "chat"
 
 @cl.on_app_startup
 def load_reranker() -> None:
-    """Load the reranker weights before the first question, not during it."""
+    """Load the local reranker's weights before the first question, not during it."""
     reranker.warm()
 
 
@@ -92,7 +93,7 @@ async def answer(message: cl.Message) -> None:
     async with cl.Step(name=views.step_title(), type="tool") as step:
         try:
             view = await _ask_showing_progress(question, history, step)
-        except (LLMError, EmbeddingError, DatabaseUnavailable) as exc:
+        except (LLMError, EmbeddingError, RerankerUnavailable, DatabaseUnavailable) as exc:
             step.output = f"Stopped: {exc}"
             await cl.Message(content=f"**Something went wrong.** {exc}").send()
             return

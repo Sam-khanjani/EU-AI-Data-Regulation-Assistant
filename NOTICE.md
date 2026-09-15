@@ -14,8 +14,8 @@ weights would additionally require shipping the model's own licence text.
 
 | Component | Role | Licence | Source |
 |---|---|---|---|
-| `cross-encoder/ms-marco-MiniLM-L-6-v2` | optional, opt-in via `RERANK_MODEL` | Apache-2.0 | <https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2> |
-| `BAAI/bge-reranker-v2-m3` | **default reranker** | Apache-2.0 | <https://huggingface.co/BAAI/bge-reranker-v2-m3> |
+| `cross-encoder/ms-marco-MiniLM-L-6-v2` | optional, opt-in via `rerank_model` in `config.py` | Apache-2.0 | <https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2> |
+| `BAAI/bge-reranker-v2-m3` | **default local reranker** | Apache-2.0 | <https://huggingface.co/BAAI/bge-reranker-v2-m3> |
 | `BAAI/bge-reranker-base` | evaluated, not used | MIT | <https://huggingface.co/BAAI/bge-reranker-base> |
 
 The default, `bge-reranker-v2-m3`, is built on `BAAI/bge-m3`, an XLM-RoBERTa architecture.

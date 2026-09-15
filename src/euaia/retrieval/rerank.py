@@ -1,4 +1,4 @@
-"""Local cross-encoder reranking.
+"""Cross-encoder reranking, local or hosted.
 
 Retrieval optimises for recall -- three legs fused, deliberately over-fetching. Reranking
 trades that back for precision, because everything surviving here is spent as context in the
@@ -28,6 +28,14 @@ chunk targets ~500 tokens while its article averages 530 and reaches 3,369, and 
 a property of the passage that matched rather than of everything else in the same article.
 Expansion happens afterwards, to the survivors only.
 
+**Two providers score the same pairs** (``rerank_provider``). ``local`` runs the model
+above on this machine. ``openrouter`` sends the question and all candidates to a hosted
+reranker in a single request -- one call per question however many candidates, so it has
+none of the old LLM reranker's per-candidate token cost, but it does bring a network
+dependency and a daily request quota. Both return a relevance score in (0, 1) per passage,
+so everything after scoring is shared. ``eval/rerankers.py`` compares them on identical
+candidate pools.
+
 Scores are advisory -- the sufficiency gate downstream decides whether the best of them is
 good enough to answer from at all. See the warning on calibration below before trusting
 :attr:`RerankResult.best_score` as that gate.
@@ -40,6 +48,8 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 
+import httpx
+
 from euaia.config import settings
 from euaia.llm.groq_client import Usage
 from euaia.retrieval.hybrid import Candidate
@@ -48,7 +58,7 @@ log = logging.getLogger(__name__)
 
 
 class RerankerUnavailable(RuntimeError):
-    """The local reranker could not be loaded.
+    """The reranker could not be loaded, or the hosted one could not be reached.
 
     Raised rather than silently falling back to retrieval order: a pipeline that quietly
     stops reranking looks healthy and answers from worse evidence.
@@ -111,6 +121,8 @@ def load_model(name: str | None = None):
 
 def warm() -> None:
     """Pre-load the model. Failures are logged, not raised -- startup should not die."""
+    if settings.rerank_provider != "local":
+        return  # nothing to load; the hosted reranker is called per request
     try:
         load_model()
     except RerankerUnavailable:
@@ -193,17 +205,12 @@ def rerank(
             skipped=True,
         )
 
-    model = load_model()
     labelled = [
         LabelledChunk(label=f"C{i}", candidate=c) for i, c in enumerate(candidates, start=1)
     ]
 
     started = time.perf_counter()
-    raw = model.predict(
-        [(question, lc.candidate.chunk_text) for lc in labelled],
-        batch_size=settings.rerank_batch_size,
-        show_progress_bar=False,
-    )
+    raw = score_passages(question, [lc.candidate.chunk_text for lc in labelled])
     elapsed_ms = int((time.perf_counter() - started) * 1000)
 
     scored = [replace(lc, score=float(s)) for lc, s in zip(labelled, raw, strict=True)]
@@ -221,3 +228,79 @@ def rerank(
         scored=len(scored),
         latency_ms=elapsed_ms,
     )
+
+
+def score_passages(
+    question: str,
+    passages: list[str],
+    provider: str | None = None,
+    model: str | None = None,
+) -> list[float]:
+    """Relevance of each passage to the question, in (0, 1), in the order given.
+
+    ``provider`` and ``model`` default to the configured reranker; passing them lets the
+    evaluation compare rerankers without changing the configuration.
+    """
+    provider = provider or settings.rerank_provider
+    if provider == "openrouter":
+        return _score_openrouter(question, passages, model or settings.openrouter_rerank_model)
+    cross_encoder = load_model(model)
+    scores = cross_encoder.predict(
+        [(question, passage) for passage in passages],
+        batch_size=settings.rerank_batch_size,
+        show_progress_bar=False,
+    )
+    return [float(s) for s in scores]
+
+
+# Worth another attempt: rate limiting and the provider's own outages. Anything else (a bad
+# key, an unknown model) fails the same way every time.
+_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+
+
+def _score_openrouter(question: str, passages: list[str], model: str) -> list[float]:
+    """Score every passage in one call to OpenRouter's rerank endpoint.
+
+    Failure raises rather than falling back to the local model, for the reason given on
+    :class:`RerankerUnavailable`: a pipeline that quietly changes how it ranks looks healthy
+    while answering from different evidence.
+    """
+    if not settings.openrouter_api_key:
+        raise RerankerUnavailable(
+            "rerank_provider is openrouter but OPENROUTER_API_KEY is not set in .env"
+        )
+    body = {"model": model, "query": question, "documents": passages}
+    headers = {"Authorization": f"Bearer {settings.openrouter_api_key}"}
+
+    error = ""
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2 * 2**attempt)
+        try:
+            response = httpx.post(
+                f"{settings.openrouter_base_url.rstrip('/')}/rerank",
+                headers=headers,
+                json=body,
+                timeout=settings.openrouter_timeout_seconds,
+            )
+        except httpx.TransportError as exc:
+            error = f"could not reach OpenRouter: {exc}"
+            continue
+        if response.status_code == 200:
+            break
+        error = f"OpenRouter rerank returned {response.status_code}: {response.text[:300]}"
+        if response.status_code not in _TRANSIENT_STATUS:
+            raise RerankerUnavailable(error)
+    else:
+        raise RerankerUnavailable(error)
+
+    scores: list[float | None] = [None] * len(passages)
+    for result in response.json().get("results", []):
+        index = result.get("index")
+        if isinstance(index, int) and 0 <= index < len(passages):
+            scores[index] = float(result["relevance_score"])
+    if any(score is None for score in scores):
+        raise RerankerUnavailable(
+            f"OpenRouter scored {sum(s is not None for s in scores)} of {len(passages)} passages"
+        )
+    return scores  # type: ignore[return-value]
