@@ -20,6 +20,12 @@ data/raw/
 .DS_Store
 Thumbs.db
 
+# Written by Chainlit into its app root at startup. Only the English translation is kept,
+# because it carries this app's wording; the others are copied fresh from the package.
+src/euaia/chat/.files/
+src/euaia/chat/.chainlit/translations/*
+!src/euaia/chat/.chainlit/translations/en-US.json
+
 # Local logs and scratch output
 *.log
 

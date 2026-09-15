@@ -1,7 +1,7 @@
 # EU AI Act Assistant -- application image.
 #
-# One image serves three roles, chosen by the command: the web app (default), database
-# migrations, and corpus ingestion. See docker-compose.yml.
+# One image serves four roles, chosen by the command: the admin dashboard (default), the
+# chat, database migrations, and corpus ingestion. See docker-compose.yml.
 
 FROM python:3.12-slim-bookworm
 
@@ -36,12 +36,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 # Run unprivileged. The volume mount points are created and chowned here so that fresh named
-# volumes inherit the ownership and stay writable.
+# volumes inherit the ownership and stay writable. Chainlit also writes into its app root at
+# startup (translations, an uploads folder), so the chat folder must be writable too.
 RUN useradd --create-home --uid 10001 app \
     && mkdir -p /app/data/raw /models \
-    && chown -R app:app /app/data /models
+    && chown -R app:app /app/data /models /app/src/euaia/chat
 USER app
 
-EXPOSE 8000
+EXPOSE 8000 8001
 
 CMD ["uvicorn", "euaia.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

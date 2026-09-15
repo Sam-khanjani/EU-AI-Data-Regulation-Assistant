@@ -23,6 +23,7 @@ ALL_SCHEMAS = {
     "query_analysis": schemas.QUERY_ANALYSIS_SCHEMA,
     "grounded_answer": schemas.ANSWER_SCHEMA,
     "criteria_assessment": schemas.ASSESSMENT_SCHEMA,
+    "standalone_question": schemas.FOLLOWUP_SCHEMA,
 }
 
 

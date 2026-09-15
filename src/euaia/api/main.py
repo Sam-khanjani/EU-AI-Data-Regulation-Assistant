@@ -1,22 +1,23 @@
-"""FastAPI application: chat UI, corpus status, and a JSON API.
+"""FastAPI application: the admin dashboard, and a JSON API.
 
-Server-rendered with Jinja and HTMX. There is no build step and no Node dependency, which
-suits a project whose interesting parts are ingestion and verification rather than the
-front end.
+The chat itself is a separate Chainlit app (``python -m euaia.chat``, port 8001). What stays
+here is for operators and tooling: corpus status and change detection behind admin auth,
+``/api/ask`` for the evaluation harness, and ``/healthz`` for Docker.
+
+Server-rendered with Jinja and HTMX, with no build step and no Node dependency.
 """
 
 from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi import status as http_status
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -25,33 +26,21 @@ from sqlalchemy.orm import Session
 from euaia.api import service
 from euaia.config import settings
 from euaia.db.session import DatabaseUnavailable, db_session
-from euaia.ingest.embeddings import EmbeddingError
 from euaia.ingest.pipeline import check_all
 from euaia.ingest.sources import ALL_SOURCES
-from euaia.llm.groq_client import LLMError
-from euaia.retrieval import rerank as reranker
 
 log = logging.getLogger(__name__)
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load the reranker before serving.
-
-    The weights are gigabytes and take seconds to read. Loading lazily would charge that
-    to whoever asks the first question, which looks exactly like the latency problem this
-    reranker was introduced to remove. Failure here is logged, not fatal: the model is
-    retried on first use and the error surfaces there with its own message.
-    """
-    reranker.warm()
-    yield
-
-
-app = FastAPI(title="EU AI Act Assistant", version="0.1.0", lifespan=lifespan)
+# The reranker is not warmed here, unlike in the chat: this app answers questions only on
+# /api/ask, so its gigabytes of weights load on the first such call rather than into every
+# dashboard process.
+app = FastAPI(title="EU AI Act Assistant", version="0.1.0")
 app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
+templates.env.globals["chat_url"] = settings.chat_url
 
 
 @app.exception_handler(DatabaseUnavailable)
@@ -101,49 +90,10 @@ def require_admin(credentials: Annotated[HTTPBasicCredentials, Depends(_admin_se
 Admin = Depends(require_admin)
 
 
-@app.get("/", response_class=HTMLResponse)
-def index(request: Request, session: Db):
-    return templates.TemplateResponse(
-        request=request,
-        name="index.html",
-        context={
-            "sources": service.corpus_status(session),
-            "config_ok": bool(settings.groq_api_key and settings.google_api_key),
-            "examples": EXAMPLE_QUESTIONS,
-        },
-    )
-
-
-@app.post("/ask", response_class=HTMLResponse)
-def ask(
-    request: Request,
-    session: Db,
-    question: Annotated[str, Form()],
-):
-    """HTMX endpoint: returns the answer fragment."""
-    question = question.strip()
-    if not question:
-        return templates.TemplateResponse(
-            request=request, name="partials/error.html",
-            context={"message": "Please enter a question."},
-        )
-
-    try:
-        view = service.ask(question, session)
-    except (LLMError, EmbeddingError) as exc:
-        return templates.TemplateResponse(
-            request=request, name="partials/error.html", context={"message": str(exc)}
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Unhandled error answering question")
-        return templates.TemplateResponse(
-            request=request, name="partials/error.html",
-            context={"message": f"Unexpected error: {exc}"},
-        )
-
-    return templates.TemplateResponse(
-        request=request, name="partials/answer.html", context={"a": view}
-    )
+@app.get("/")
+def index():
+    """There is no public page here any more; the chat runs on its own port."""
+    return RedirectResponse("/status")
 
 
 @app.post("/api/ask")
@@ -201,12 +151,3 @@ def healthz(session: Db):
         "groq_key": bool(settings.groq_api_key),
         "google_key": bool(settings.google_api_key),
     }
-
-
-EXAMPLE_QUESTIONS = [
-    "Which AI practices are prohibited?",
-    "What requirements apply to high-risk AI systems?",
-    "What must an AI system tell users under Article 50?",
-    "What are the obligations of a deployer of a high-risk AI system?",
-    "Is my CV-screening tool a high-risk AI system?",
-]

@@ -4,6 +4,9 @@
                                           |                                      |
                                           +------------- abstain <---------------+
 
+In a conversation, a follow-up is first rewritten to stand alone (:func:`rewrite_followup`),
+so everything above still sees a single question.
+
 Two gates decide whether anything is said at all:
 
 **Sufficiency** runs before generation. If nothing retrieved scores above the relevance
@@ -24,18 +27,23 @@ from __future__ import annotations
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 
 from sqlalchemy.orm import Session
 
 from euaia.config import settings
 from euaia.graph import prompts
-from euaia.graph.state import QueryState
+from euaia.graph.state import Progress, QueryState, Turn
 from euaia.ingest.embeddings import Embedder
 from euaia.llm.groq_client import GroqClient, SchemaValidationFailed
 from euaia.llm.ratelimit import Limits, estimate_tokens
-from euaia.llm.schemas import ANSWER_SCHEMA, ASSESSMENT_SCHEMA, QUERY_ANALYSIS_SCHEMA
+from euaia.llm.schemas import (
+    ANSWER_SCHEMA,
+    ASSESSMENT_SCHEMA,
+    FOLLOWUP_SCHEMA,
+    QUERY_ANALYSIS_SCHEMA,
+)
 from euaia.retrieval.hybrid import (
     RetrievedUnit,
     expand_to_units,
@@ -60,6 +68,42 @@ UNSUPPORTED_REASON = (
     "A draft answer was produced but too little of it could be verified against the "
     "regulation text, so it has been withheld."
 )
+
+
+def rewrite_followup(state: QueryState, history: Sequence[Turn], client: GroqClient) -> QueryState:
+    """Turn a follow-up such as "what about deployers?" into a question that stands alone.
+
+    Everything downstream -- retrieval, the answer prompt, the audit row -- sees one question
+    and no conversation, which keeps the grounding argument unchanged: the rewritten question
+    is answered from the evidence exactly as a typed one would be. The rewrite only decides
+    *what* is asked. What the user typed is kept in ``state.asked``.
+    """
+    state.note("rewriting", "reading the conversation so far")
+    try:
+        completion = client.structured(
+            system=prompts.FOLLOWUP_SYSTEM,
+            user=prompts.followup_prompt(history, state.question),
+            response_format=FOLLOWUP_SCHEMA,
+            model=settings.groq_small_model,
+            # A short answer, but the model reasons before writing it, and the client refuses
+            # any allowance below MIN_OUTPUT_TOKENS.
+            max_completion_tokens=1024,
+            reasoning_effort="low",
+        )
+    except SchemaValidationFailed:
+        # The rewrite only steers the search; whatever is asked is still answered from
+        # verified evidence. So a failed rewrite should cost some precision, not the answer:
+        # search with the previous question alongside the new message.
+        log.warning("Follow-up rewrite was rejected; searching with the previous question too")
+        standalone = f"{history[-1].question} {state.question}"
+    else:
+        state.usage.add(completion.usage)
+        standalone = str(completion.data.get("standalone_question") or "").strip()
+
+    if standalone and standalone != state.question:
+        state.asked, state.question = state.question, standalone
+        state.note("rewritten", standalone)
+    return state
 
 
 def analyse(state: QueryState, client: GroqClient) -> QueryState:
@@ -421,11 +465,19 @@ def run_pipeline(
     session: Session,
     client: GroqClient,
     embedder: Embedder,
+    history: Sequence[Turn] = (),
+    on_progress: Callable[[Progress], None] | None = None,
 ) -> QueryState:
-    """Execute the whole graph for one question."""
-    started = time.perf_counter()
-    state = QueryState(question=question)
+    """Execute the whole graph for one question.
 
+    ``history`` is the conversation so far, oldest first; with none, the question is taken
+    as typed. ``on_progress`` hears about each step as it starts.
+    """
+    started = time.perf_counter()
+    state = QueryState(question=question, on_progress=on_progress)
+
+    if history:
+        rewrite_followup(state, history[-settings.followup_turns :], client)
     analyse(state, client)
     if state.intent == "out_of_scope":
         state.note("abstaining", "question is outside the indexed corpus")

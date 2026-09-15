@@ -84,6 +84,24 @@ QUERY_ANALYSIS_SCHEMA = _schema(
 )
 
 
+# --------------------------------------------------------------------- follow-up
+
+FOLLOWUP_SCHEMA = _schema(
+    "standalone_question",
+    {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["standalone_question"],
+        "properties": {
+            "standalone_question": {
+                "type": "string",
+                "description": "The latest message, rewritten to be understood on its own.",
+            },
+        },
+    },
+)
+
+
 # --------------------------------------------------------------------- answer
 
 ANSWER_SCHEMA = _schema(
@@ -100,8 +118,8 @@ ANSWER_SCHEMA = _schema(
             "summary": {
                 "type": "string",
                 "description": (
-                    "One or two sentences framing the answer. Must not introduce any fact "
-                    "that is not also stated in a claim."
+                    "Two or three sentences answering the question directly. Must not "
+                    "introduce any fact that is not also stated in a claim."
                 ),
             },
             "claims": {
@@ -115,7 +133,10 @@ ANSWER_SCHEMA = _schema(
                     "additionalProperties": False,
                     "required": ["text", "supporting_quotes"],
                     "properties": {
-                        "text": {"type": "string"},
+                        "text": {
+                            "type": "string",
+                            "description": "One or two plain-English sentences on one point.",
+                        },
                         "supporting_quotes": {
                             "type": "array",
                             "items": {

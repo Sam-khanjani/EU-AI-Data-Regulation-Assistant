@@ -1,19 +1,22 @@
 # Everything shares one image; the command decides what a container does.
 #
-#   docker compose up -d --build                        database + migrations + web app
+#   docker compose up -d --build                        database + migrations + chat + admin
 #   docker compose --profile tools run --rm ingest      fetch, parse, embed the corpus
 #
 # See "Running with Docker" in README.md.
+
+x-app-env: &app-env
+  # Inside the compose network the database is `db:5432`. The DATABASE_URL in .env points at
+  # 127.0.0.1:5433 -- the host-side port mapping, which a container cannot reach -- so it is
+  # overridden here. POSTGRES_PASSWORD must be URL-safe (or percent-encoded) to embed.
+  DATABASE_URL: postgresql+psycopg://euaia:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/euaia
 
 x-app: &app
   build: .
   image: euaia-app
   env_file: .env
   environment:
-    # Inside the compose network the database is `db:5432`. The DATABASE_URL in .env points
-    # at 127.0.0.1:5433 -- the host-side port mapping, which a container cannot reach -- so it
-    # is overridden here. POSTGRES_PASSWORD must be URL-safe (or percent-encoded) to embed.
-    DATABASE_URL: postgresql+psycopg://euaia:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/euaia
+    <<: *app-env
   volumes:
     - euaia-models:/models      # reranker weights, downloaded once
     - euaia-raw:/app/data/raw   # source PDFs fetched from CELLAR
@@ -46,6 +49,39 @@ services:
       db:
         condition: service_healthy
 
+  # The chat: Chainlit on 8001.
+  chat:
+    <<: *app
+    container_name: euaia-chat
+    command: ["python", "-m", "euaia.chat", "--host", "0.0.0.0"]
+    environment:
+      <<: *app-env
+      # Required, not just passed through from .env: without them nobody can sign in, and
+      # failing at `up` says so more clearly than a login page that refuses everyone.
+      CHAINLIT_AUTH_SECRET: ${CHAINLIT_AUTH_SECRET:?set CHAINLIT_AUTH_SECRET in .env}
+      CHAT_USERS: ${CHAT_USERS:?set CHAT_USERS in .env}
+      CHAT_URL: http://127.0.0.1:8001
+    ports:
+      - "127.0.0.1:8001:8001"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(urllib.request.urlopen('http://127.0.0.1:8001/', timeout=5).status != 200)"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      # The first start downloads the reranker weights before serving; allow for it.
+      start_period: 15m
+
+  # The admin dashboard (/status), plus /api/ask for the evaluation harness, on 8000.
   app:
     <<: *app
     container_name: euaia-app
@@ -66,8 +102,7 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
-      # The first start downloads the reranker weights before serving; allow for it.
-      start_period: 15m
+      start_period: 30s
 
   # On demand only (`--profile tools`): a one-shot job, not a service that should stay up.
   ingest:

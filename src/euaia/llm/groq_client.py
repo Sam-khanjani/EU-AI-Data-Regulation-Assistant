@@ -60,11 +60,16 @@ class LLMError(RuntimeError):
 
 
 class SchemaValidationFailed(LLMError):
-    """Groq rejected the model's output as non-conforming (400 json_validate_failed).
+    """Groq rejected the model's output as non-conforming.
 
-    Usually means the model ran out of output budget and closed the object before emitting
-    every required field. Worth one retry; not worth pretending it succeeded.
+    ``json_validate_failed`` usually means the model ran out of output budget and closed the
+    object before emitting every required field. ``output_parse_failed`` means it wrote
+    something that was not JSON at all -- seen from the small model writing its reasoning
+    where the object belonged. Either is worth one changed retry (fewer claims, a fallback);
+    neither is worth repeating verbatim, and neither is worth pretending it succeeded.
     """
+
+_REJECTED_OUTPUT = ("json_validate_failed", "output_parse_failed")
 
 
 @dataclass(slots=True)
@@ -252,7 +257,7 @@ class GroqClient:
         try:
             return self._client.chat.completions.create(**kwargs)
         except BadRequestError as exc:
-            if "json_validate_failed" in str(exc):
+            if any(code in str(exc) for code in _REJECTED_OUTPUT):
                 raise SchemaValidationFailed(
                     f"{model} produced output that did not satisfy the schema "
                     "(usually a truncated object). Consider raising max_completion_tokens "

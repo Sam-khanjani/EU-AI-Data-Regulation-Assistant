@@ -1,0 +1,29 @@
+/* Citations: small pills after the sentence they support, read as footnotes rather than
+   prose. Every EUR-Lex link in an answer is a verified quote; hovering shows the quote. */
+.message-content a[href^="https://eur-lex.europa.eu"] {
+    display: inline-block;
+    margin: 0 1px;
+    padding: 0 8px;
+    border: 1px solid hsl(var(--border));
+    border-radius: 999px;
+    background: hsl(var(--muted) / 0.55);
+    color: hsl(var(--muted-foreground)) !important;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.35rem;
+    white-space: nowrap;
+    text-decoration: none !important;
+    vertical-align: 0.08em;
+    transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.message-content a[href^="https://eur-lex.europa.eu"]:hover {
+    border-color: hsl(var(--primary));
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground)) !important;
+}
+
+/* Quoted source text in the verification step. */
+.message-content blockquote {
+    border-left: 3px solid hsl(var(--primary) / 0.6);
+}

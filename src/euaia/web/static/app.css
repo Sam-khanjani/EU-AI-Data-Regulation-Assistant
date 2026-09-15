@@ -11,7 +11,6 @@
   --bad-bg: #fdeaea;
   --warn: #8a6a1f;
   --warn-bg: #fdf5e3;
-  --quote-bg: #f5f6f8;
 }
 
 * { box-sizing: border-box; }
@@ -37,97 +36,30 @@ h1 { font-size: 26px; margin: 0 0 8px; }
 h2 { font-size: 19px; }
 h3 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 
-.intro p { color: var(--muted); max-width: 62ch; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 
-/* --- ask form --- */
-.ask { margin: 20px 0 10px; }
-.ask textarea {
-  width: 100%; padding: 12px; font: inherit; border: 1px solid var(--line);
-  border-radius: 8px; background: var(--panel); resize: vertical;
-}
-.ask textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-.ask-actions { display: flex; align-items: center; gap: 14px; margin-top: 10px; }
-button[type=submit] {
+button {
   background: var(--accent); color: #fff; border: 0; border-radius: 8px;
-  padding: 9px 22px; font: inherit; cursor: pointer;
+  padding: 8px 18px; font: inherit; font-size: 15px; cursor: pointer;
 }
-button[type=submit]:disabled { opacity: .5; cursor: progress; }
+button:disabled { opacity: .5; cursor: progress; }
 
 .htmx-indicator { display: none; color: var(--muted); font-size: 14px; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }
-
-.examples { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 26px; }
-.chip {
-  background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
-  padding: 5px 13px; font: inherit; font-size: 13px; color: var(--muted); cursor: pointer;
-}
-.chip:hover { border-color: var(--accent); color: var(--accent); }
-
-/* --- answer --- */
-.answer {
-  background: var(--panel); border: 1px solid var(--line);
-  border-radius: 12px; padding: 22px; margin-bottom: 28px;
-}
-.verdict h2 { margin: 0 0 6px; }
-.verdict.abstain h2 { color: var(--bad); }
-.verdict.partial h2 { color: #9a6b00; }
-.summary { font-size: 17px; }
-
-.notice {
-  background: var(--warn-bg); border: 1px solid #eedcae; border-radius: 8px;
-  padding: 11px 14px; font-size: 14px; margin: 14px 0;
-}
-
-.claims, .criteria { padding-left: 20px; }
-.claims > li, .criteria > li { margin-bottom: 22px; }
-.criterion-head { display: flex; align-items: baseline; gap: 10px; }
-
-.status { font-size: 12px; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
-.status.met { background: var(--good-bg); color: var(--good); }
-.status.not_met { background: var(--bad-bg); color: var(--bad); }
-.status.needs_user_input { background: #eef1f7; color: #3b4a66; }
-
-.citation { margin: 10px 0 0; }
-.citation blockquote {
-  margin: 0; padding: 10px 14px; background: var(--quote-bg);
-  border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0;
-  font-size: 14.5px;
-}
-.citation figcaption { font-size: 13px; color: var(--muted); margin-top: 5px; }
-.citation figcaption a { color: var(--accent); }
 
 .pill { font-size: 11px; padding: 1px 8px; border-radius: 999px; margin-left: 6px; }
 .pill.good { background: var(--good-bg); color: var(--good); }
 .pill.bad { background: var(--bad-bg); color: var(--bad); }
 .pill.warn { background: var(--warn-bg); color: var(--warn); }
 
-.followups ul, .gaps ul { color: var(--muted); font-size: 14.5px; }
-
-/* --- verification panel --- */
-.verification { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 12px; }
-.verification summary { cursor: pointer; font-size: 14px; }
-.verification dl {
-  display: grid; grid-template-columns: minmax(180px, auto) 1fr;
-  gap: 4px 18px; font-size: 13.5px; margin: 12px 0;
-}
-.verification dt { color: var(--muted); }
-.verification dd { margin: 0; }
-.steps { font-size: 13px; color: var(--muted); padding-left: 20px; }
-
 /* --- banners --- */
 .banner { border-radius: 8px; padding: 13px 16px; margin-bottom: 20px; font-size: 14.5px; }
 .banner p { margin: 4px 0 0; }
-.banner.warn { background: var(--warn-bg); border: 1px solid #eedcae; }
 .banner.error { background: var(--bad-bg); border: 1px solid #f0c4c4; }
 
 /* --- corpus --- */
-.corpus-mini { margin-top: 34px; font-size: 14px; }
-.corpus-mini ul { list-style: none; padding: 0; }
-.corpus-mini li { padding: 5px 0; border-bottom: 1px solid var(--line); }
-
 table.corpus { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 18px; }
 table.corpus th, table.corpus td {
   text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top;

@@ -151,6 +151,23 @@ class TestSchemaRejection:
             c.structured(system="s", user="u", response_format=SCHEMA)
         assert fake.calls == 1, "retrying an identical request just fails identically"
 
+    def test_text_instead_of_json_is_also_a_rejection_and_not_retried(self, client, monkeypatch):
+        # Seen live: the small model wrote its reasoning where the object belonged, and four
+        # identical retries at temperature 0 failed identically before the error surfaced.
+        from euaia.llm import groq_client as mod
+
+        class FakeBadRequest(Exception):
+            pass
+
+        monkeypatch.setattr(mod, "BadRequestError", FakeBadRequest)
+        err = FakeBadRequest(
+            "400 - {'error': {'code': 'output_parse_failed', 'failed_generation': 'Need to'}}"
+        )
+        c, fake = client(err)
+        with pytest.raises(SchemaValidationFailed):
+            c.structured(system="s", user="u", response_format=SCHEMA)
+        assert fake.calls == 1
+
     def test_other_bad_requests_propagate(self, client, monkeypatch):
         from euaia.llm import groq_client as mod
 

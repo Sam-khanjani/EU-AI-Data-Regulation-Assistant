@@ -68,8 +68,14 @@ class TestCheckEndpointRequiresAuth:
 
 
 class TestPublicRoutesStayOpen:
-    def test_the_chat_page_needs_no_credentials(self):
-        assert client.get("/").status_code == 200
+    def test_the_root_sends_visitors_to_the_dashboard(self):
+        # The chat moved to its own Chainlit app; nothing public is served here any more.
+        resp = client.get("/", follow_redirects=False)
+        assert resp.status_code == 307
+        assert resp.headers["location"] == "/status"
+
+    def test_the_chat_page_is_gone(self):
+        assert client.post("/ask", data={"question": "Which AI practices are prohibited?"}).status_code == 404
 
     def test_healthz_needs_no_credentials(self):
         assert client.get("/healthz").status_code == 200

@@ -158,7 +158,18 @@ class Settings(BaseSettings):
     raw_data_dir: Path = REPO_ROOT / "data" / "raw"
 
     # --- Prompt versioning (recorded in query_log for auditability) ---
-    prompt_version: str = "v1"
+    # v2: fuller, plain-English answers, and follow-up questions rewritten to stand alone.
+    prompt_version: str = "v2"
+
+    # --- Chat interface (python -m euaia.chat) ---
+    # Who may sign in: comma-separated name:password pairs, e.g. "alice:s3cret,bob:hunter2".
+    # Empty refuses every sign-in, for the same reason ADMIN_PASSWORD does. Chainlit also
+    # needs CHAINLIT_AUTH_SECRET to sign its session tokens; see .env.example.
+    chat_users: str = ""
+    # Earlier turns shown to the follow-up rewriter. Each costs tokens on every follow-up.
+    followup_turns: int = 3
+    # Where the admin dashboard links to for the chat.
+    chat_url: str = "http://127.0.0.1:8001"
 
 
 settings = Settings()

@@ -29,6 +29,11 @@ For "is my system high-risk?"-type questions, the assistant never states a verdi
 returns a checklist of the relevant criteria, cited and quoted, with the questions needed to
 resolve it. The determination depends on facts only the user has.
 
+In the chat, an answer reads as prose with a small citation link after each statement; hovering
+shows the verified quote, clicking opens the provision on EUR-Lex. A follow-up such as "what
+about providers?" is first rewritten into a standalone question, so retrieval and verification
+still work on one self-contained question. Conversations are saved per user.
+
 ## Stack
 
 | Layer | Choice |
@@ -40,7 +45,8 @@ resolve it. The determination depends on facts only the user has.
 | Query analysis | Groq `openai/gpt-oss-20b` |
 | Reranking | `BAAI/bge-reranker-v2-m3` cross-encoder, **run locally** |
 | Orchestration | LangGraph |
-| API / UI | FastAPI + Jinja2 + HTMX |
+| Chat | Chainlit, with sign-in and saved conversations |
+| Admin / API | FastAPI + Jinja2 + HTMX |
 
 Both providers are used on free tiers, which are tight enough to shape the design directly —
 chunking, caching, and prompt sizing are all built to fit inside them. Details on that, and on
@@ -74,7 +80,15 @@ This registers two sources: `eu-ai-act`, the latest consolidated act (operative 
 amendments applied), and `eu-ai-act-recitals`, the act as adopted (for its recitals, which
 consolidation doesn't restate).
 
-Run the app, then open <http://localhost:8000>:
+Set `CHAT_USERS` and `CHAINLIT_AUTH_SECRET` in `.env` (see `.env.example`), then start the
+chat and open <http://127.0.0.1:8001>:
+
+```bash
+uv run python -m euaia.chat
+```
+
+The admin dashboard (corpus status and change detection, behind `ADMIN_PASSWORD`) is a
+separate app on <http://127.0.0.1:8000/status>:
 
 ```bash
 uv run uvicorn euaia.api.main:app --reload
@@ -82,16 +96,18 @@ uv run uvicorn euaia.api.main:app --reload
 
 ## Running with Docker
 
-The whole stack — database, migrations, web app — runs under Docker Compose, with no local
-Python needed.
+The whole stack — database, migrations, chat, admin dashboard — runs under Docker Compose,
+with no local Python needed.
 
 ```bash
-cp .env.example .env      # fill in GROQ_API_KEY, GOOGLE_API_KEY, POSTGRES_PASSWORD, ADMIN_PASSWORD
+cp .env.example .env      # fill in GROQ_API_KEY, GOOGLE_API_KEY, POSTGRES_PASSWORD, ADMIN_PASSWORD,
+                          # CHAT_USERS and CHAINLIT_AUTH_SECRET
 docker compose up -d --build
 ```
 
-Then open <http://127.0.0.1:8000>. On first start the app downloads the reranker weights
-(~2.3 GB) before it begins serving; follow it with `docker compose logs -f app`. Later starts
+Then open the chat at <http://127.0.0.1:8001>, or the admin dashboard at
+<http://127.0.0.1:8000/status>. On first start the chat downloads the reranker weights
+(~2.3 GB) before it begins serving; follow it with `docker compose logs -f chat`. Later starts
 reuse them from a volume.
 
 Ingest the corpus once (and again whenever you want to pick up a new consolidated version):
@@ -105,7 +121,8 @@ docker compose --profile tools run --rm ingest --skip-embeddings   # structure o
 |---|---|---|
 | `db` | Postgres 17 + pgvector, published on `127.0.0.1:5433` | long-running |
 | `migrate` | `alembic upgrade head` | runs once per `up`, then exits |
-| `app` | web UI and API on `127.0.0.1:8000` | long-running, waits for `migrate` |
+| `chat` | Chainlit chat on `127.0.0.1:8001` | long-running, waits for `migrate` |
+| `app` | admin dashboard, `/api/ask` and `/healthz` on `127.0.0.1:8000` | long-running, waits for `migrate` |
 | `ingest` | fetch, parse, chunk, embed | on demand, `tools` profile only |
 
 Data lives in three named volumes: `euaia-pgdata` (database), `euaia-models` (reranker
@@ -124,6 +141,32 @@ Notes:
   `pyproject.toml` routes it to the CPU wheel index instead, keeping several GB of unused GPU
   libraries out of the image.
 - Everything is published on `127.0.0.1` only. Nothing is reachable from other machines.
+
+## Chat sign-in
+
+The chat has no built-in accounts and no default login. Who may sign in is set by `CHAT_USERS`
+in `.env`, as `username:password` pairs separated by commas:
+
+```bash
+# one user
+CHAT_USERS=sam:a-strong-password
+# or several
+CHAT_USERS=sam:first-password,alex:second-password
+# generate with: uv run chainlit create-secret
+CHAINLIT_AUTH_SECRET=...
+```
+
+- **An empty `CHAT_USERS` refuses everyone**, the same way an empty `ADMIN_PASSWORD` locks the
+  dashboard. With Docker, `docker compose up` stops with an error until both values are set.
+- **Passwords may contain `:` but not `,`**, because the comma separates users. Keep the value
+  on one line, and put any comment on its own line rather than after the value.
+- **Saved conversations belong to the username.** Removing a user stops them signing in; their
+  conversations stay in the database. Signing in again under the same name brings them back.
+- **`CHAINLIT_AUTH_SECRET` signs sign-in sessions.** Changing it signs everyone out.
+- **Changes take effect on restart:** `docker compose up -d chat` with Docker, or restart
+  `python -m euaia.chat` when running locally.
+
+The admin dashboard uses its own, separate login: `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 
 ## Reranker model
 
@@ -232,7 +275,8 @@ src/euaia/
   graph/      pipeline nodes, state, prompts
   llm/        Groq client and structured-output schemas
   verify/     text normalisation and citation verification
-  api/ web/   FastAPI routes and server-rendered UI
+  chat/       Chainlit chat: sign-in, saved conversations, how answers are shown
+  api/ web/   answer service, admin dashboard and JSON API
 eval/         question set, scoring harness
 ```
 
@@ -240,8 +284,8 @@ eval/         question set, scoring harness
 
 Re-ingesting never overwrites a prior version — a new `document_version` row is written and
 the old one is marked superseded, with at most one active version per source at any time.
-Every answer records which document version it was generated from. `/status` shows what's
-currently indexed.
+Every answer records which document version it was generated from. `/status` on the admin
+dashboard shows what's currently indexed.
 
 ## Status
 

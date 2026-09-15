@@ -55,6 +55,26 @@ articles might be relevant; that is retrieval's job. Article numbers are bare st
 as "6", "50", "4a". Annexes are Roman numerals such as "III".
 """
 
+FOLLOWUP_SYSTEM = """\
+You prepare the latest message in a conversation about the EU AI Act for a search over the
+Regulation's text. The search sees only one message, never the conversation.
+
+Rewrite the latest message as a standalone question that means exactly what the user meant
+in context. Resolve references such as "it", "they", "that article" or "what about
+deployers?" using the earlier turns. Keep the user's own wording wherever it is already
+clear, and do not add topics, details or assumptions they did not raise.
+
+If the latest message already stands on its own, or changes the subject, return it
+unchanged. Never answer the question.
+
+EXAMPLES, after the user asked "Which AI practices are prohibited?"
+
+- "Does that apply to the police?" -> "Do the prohibited AI practices apply to the police?"
+- "What about emotion recognition?" -> "Is emotion recognition a prohibited AI practice?"
+- "Are there exceptions to those?" -> "Are there exceptions to the prohibited AI practices?"
+- "What does Article 50 require?" -> "What does Article 50 require?" (already stands alone)
+"""
+
 # There is no rerank prompt any more. Reranking asked a model to score every candidate
 # 0-10 inside one prompt, which put its cost at the sum of all candidates -- ~9,000 tokens
 # for 20 of our chunks against an 8,000/min ceiling. It is now a local cross-encoder that
@@ -83,13 +103,18 @@ RULES
 4. One claim per distinct point, each with its own quote. Do not bundle several obligations
    into one claim. Make at most {max_claims} claims -- cover the most important points
    rather than every one exhaustively.
-5. The summary may not introduce anything that is not also stated in a claim.
-6. If the evidence does not answer the question, set answerable to false and explain what is
+5. Write for someone who has not read the Regulation. Each claim is one or two complete,
+   plain-English sentences that explain its point: what the rule requires or forbids, who
+   it applies to, and any condition or exception the evidence states. In order, the summary
+   and the claims should read as one clear, well-organised answer.
+6. The summary answers the question directly in two or three sentences. It may not
+   introduce anything that is not also stated in a claim.
+7. If the evidence does not answer the question, set answerable to false and explain what is
    missing. Abstaining is a correct answer, not a failure.
-7. Never rely on background knowledge of the AI Act. If it is not in the evidence, it does
+8. Never rely on background knowledge of the AI Act. If it is not in the evidence, it does
    not exist for this answer.
-8. Do not give legal advice or state a legal conclusion about the user's own system.
-9. Fill in EVERY field of the response format, including unanswered_aspects and
+9. Do not give legal advice or state a legal conclusion about the user's own system.
+10. Fill in EVERY field of the response format, including unanswered_aspects and
    abstain_reason. Use an empty list or null where there is nothing to say. A response
    missing a field is rejected outright and the whole answer is lost.
 """
@@ -150,6 +175,12 @@ def format_evidence(units) -> str:
             header += f"  ({unit.version_label})"
         blocks.append(f"{header}\n{unit.text}")
     return "\n\n---\n\n".join(blocks)
+
+
+def followup_prompt(history, message: str) -> str:
+    """The earlier turns, oldest first, then the message to rewrite."""
+    turns = "\n\n".join(f"User: {t.question}\nAssistant: {t.answer}" for t in history)
+    return f"CONVERSATION\n\n{turns}\n\nLATEST MESSAGE\n{message}"
 
 
 def user_prompt(

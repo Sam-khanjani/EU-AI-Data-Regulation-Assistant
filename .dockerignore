@@ -4,6 +4,9 @@
 .env.*
 !.env.example
 
+# Chainlit's generated files; recreated at startup
+src/euaia/chat/.files/
+
 # Local environments and caches
 .venv/
 __pycache__/

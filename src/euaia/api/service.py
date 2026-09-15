@@ -9,6 +9,7 @@ which prompt version was in force.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,7 +19,7 @@ from sqlalchemy.orm import Session
 from euaia.config import settings
 from euaia.db.models import CheckRun, Chunk, DocumentVersion, QueryLog, Source
 from euaia.graph.nodes import run_pipeline
-from euaia.graph.state import QueryState
+from euaia.graph.state import Progress, QueryState, Turn
 from euaia.ingest.embeddings import Embedder
 from euaia.llm.groq_client import GroqClient
 from euaia.verify.citations import VerifiedQuote
@@ -49,6 +50,8 @@ class AnswerView:
 
     question: str
     verdict: str
+    asked: str = ""
+    """What the user typed, when a follow-up was rewritten into ``question``."""
     summary: str = ""
     claims: list[AnswerClaim] = field(default_factory=list)
     criteria: list[dict[str, Any]] = field(default_factory=list)
@@ -79,12 +82,15 @@ def ask(
     session: Session,
     client: GroqClient | None = None,
     embedder: Embedder | None = None,
+    *,
+    history: Sequence[Turn] = (),
+    on_progress: Callable[[Progress], None] | None = None,
 ) -> AnswerView:
-    """Answer a question and log the attempt."""
+    """Answer a question, in the context of any earlier turns, and log the attempt."""
     client = client or GroqClient()
     embedder = embedder or Embedder()
 
-    state = run_pipeline(question, session, client, embedder)
+    state = run_pipeline(question, session, client, embedder, history, on_progress)
     view = _to_view(state)
     view.query_log_id = _log(session, state, view)
     return view
@@ -148,6 +154,7 @@ def _to_view(state: QueryState) -> AnswerView:
     view = AnswerView(
         question=state.question,
         verdict=state.verdict,
+        asked=state.asked,
         summary=state.summary,
         criteria=_criteria_view(state),
         abstain_reason=state.abstain_reason,

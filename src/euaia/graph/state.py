@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 from euaia.llm.groq_client import Usage
 from euaia.retrieval.hybrid import Candidate, RetrievedUnit
@@ -23,11 +24,23 @@ class Progress:
     detail: str = ""
 
 
+class Turn(NamedTuple):
+    """One earlier exchange in a conversation, as the follow-up rewriter reads it."""
+
+    question: str
+    """The standalone question that was answered, not necessarily what was typed."""
+    answer: str
+    """A plain-text recap of the answer."""
+
+
 @dataclass(slots=True)
 class QueryState:
     """Everything one question accumulates on its way through the graph."""
 
     question: str
+    """The question the pipeline answers: a follow-up is rewritten to stand alone first."""
+    asked: str = ""
+    """What the user actually typed, when it differs from ``question``."""
 
     # analyse
     intent: str = "lookup"
@@ -63,9 +76,14 @@ class QueryState:
     progress: list[Progress] = field(default_factory=list)
     latency_ms: int = 0
     query_log_id: int | None = None
+    on_progress: Callable[[Progress], None] | None = None
+    """Called with each step as it happens, so a chat interface can show the work live."""
 
     def note(self, step: str, detail: str = "") -> None:
-        self.progress.append(Progress(step=step, detail=detail))
+        progress = Progress(step=step, detail=detail)
+        self.progress.append(progress)
+        if self.on_progress is not None:
+            self.on_progress(progress)
 
     @property
     def document_version_ids(self) -> list[int]:
