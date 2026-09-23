@@ -14,7 +14,7 @@ def candidate(i: int, text: str) -> Candidate:
     return Candidate(
         chunk_id=i, unit_id=i, unit_path=f"ART_{i}", unit_type="article", unit_number=str(i),
         heading=None, document_version_id=1, version_label="v", source_key="eu-ai-act",
-        text=text, chunk_text=text,
+        authority="law", text=text, chunk_text=text,
     )
 
 

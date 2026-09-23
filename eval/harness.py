@@ -55,6 +55,10 @@ class CaseResult:
     abstention_correct: bool
     cited_articles: set[str] = field(default_factory=set)
     cited_annexes: set[str] = field(default_factory=set)
+    bases: dict[str, int] = field(default_factory=dict)
+    """How many claims rested on each authority tier. Free to collect -- it comes out of the
+    same response -- and it is the only way to see an answer that is well-cited, fully
+    verified, and still built mostly out of documents that impose no obligation."""
     recall: float | None = None
     quotes_total: int = 0
     quotes_dropped: int = 0
@@ -140,6 +144,11 @@ def evaluate_response(case: Case, payload: dict[str, Any]) -> CaseResult:
         found = cited_articles | {f"anx:{a}" for a in cited_annexes}
         recall = len(expected & found) / len(expected)
 
+    bases: dict[str, int] = {}
+    for claim in payload.get("claims", []):
+        tier = claim.get("basis", "law")
+        bases[tier] = bases.get(tier, 0) + 1
+
     criteria = payload.get("criteria", [])
     blob = " ".join(
         [payload.get("summary", "")]
@@ -153,6 +162,7 @@ def evaluate_response(case: Case, payload: dict[str, Any]) -> CaseResult:
         verdict=verdict,
         answered=answered,
         abstained=abstained,
+        bases=bases,
         abstention_correct=(abstained == case.should_abstain),
         cited_articles=cited_articles,
         cited_annexes=cited_annexes,
@@ -188,6 +198,16 @@ def summarise(results: list[CaseResult]) -> dict[str, Any]:
         "correct_refusals": f"{sum(1 for r in refusable if r.abstained)}/{len(refusable)}",
         "false_answers": [r.case.id for r in refusable if r.answered],
         "citation_recall": mean([r.recall for r in with_recall]),
+        # An answered question whose claims rest on no binding provision at all. Not
+        # necessarily wrong -- some questions the Act genuinely does not address -- but it is
+        # the shape a mis-tiered answer takes, and nothing else in this report would show it.
+        "answers_without_binding_law": [
+            r.case.id for r in ok if r.answered and r.bases and not r.bases.get("law")
+        ],
+        "claims_by_authority": {
+            tier: sum(r.bases.get(tier, 0) for r in ok)
+            for tier in ("law", "guidance", "code")
+        },
         "quote_accuracy": mean([r.quote_accuracy for r in with_quotes]),
         "quotes_total": sum(r.quotes_total for r in ok),
         "quotes_dropped": sum(r.quotes_dropped for r in ok),
@@ -205,9 +225,11 @@ def summarise(results: list[CaseResult]) -> dict[str, Any]:
 
 
 def format_report(results: list[CaseResult], summary: dict[str, Any]) -> str:
-    lines = ["", "=" * 78, "EVALUATION", "=" * 78, ""]
-    lines.append(f"{'id':32s} {'category':14s} {'verdict':10s} {'recall':>7s} {'quotes':>10s}")
-    lines.append("-" * 78)
+    lines = ["", "=" * 94, "EVALUATION", "=" * 94, ""]
+    lines.append(
+        f"{'id':32s} {'category':14s} {'verdict':10s} {'recall':>7s} {'quotes':>10s} {'basis':>14s}"
+    )
+    lines.append("-" * 94)
     for r in results:
         if r.error:
             lines.append(f"{r.case.id:32s} {r.case.category:14s} ERROR: {r.error[:30]}")
@@ -215,13 +237,17 @@ def format_report(results: list[CaseResult], summary: dict[str, Any]) -> str:
         mark = " " if r.abstention_correct else "!"
         recall = "-" if r.recall is None else f"{r.recall:.0%}"
         quotes = f"{r.quotes_total - r.quotes_dropped}/{r.quotes_total}"
+        basis = "/".join(f"{n[0]}{c}" for n, c in sorted(r.bases.items())) or "-"
         lines.append(
-            f"{mark}{r.case.id:31s} {r.case.category:14s} {r.verdict:10s} {recall:>7s} {quotes:>10s}"
+            f"{mark}{r.case.id:31s} {r.case.category:14s} {r.verdict:10s} "
+            f"{recall:>7s} {quotes:>10s} {basis:>14s}"
         )
 
-    lines += ["", "-" * 78, "SUMMARY", "-" * 78]
+    lines += ["", "-" * 94, "SUMMARY", "-" * 94]
     for key, value in summary.items():
-        if isinstance(value, float):
+        if isinstance(value, dict):
+            value = ", ".join(f"{k} {v}" for k, v in value.items())
+        elif isinstance(value, float):
             value = f"{value:.1%}" if value <= 1.0 else f"{value:.2f}"
         lines.append(f"  {key:32s} {value}")
     lines.append("")

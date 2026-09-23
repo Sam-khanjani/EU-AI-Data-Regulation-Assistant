@@ -346,7 +346,7 @@ class TestTokenBudget:
             unit_id=unit_id, unit_path=f"ART_{unit_id}", unit_type="article",
             unit_number=str(unit_id), heading=None, citation_label=f"Article {unit_id}",
             text=body, document_version_id=1, version_label="v", source_key="k",
-            deeplink=None, score=1.0,
+            authority="law", deeplink=None, score=1.0,
         )
 
     def test_stops_once_the_budget_is_spent(self):

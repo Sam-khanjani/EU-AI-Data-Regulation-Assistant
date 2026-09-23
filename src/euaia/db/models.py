@@ -50,6 +50,13 @@ UnitType = Enum(
     "recital", "chapter", "section", "article", "paragraph", "point", "annex",
     name="unit_type", native_enum=False,
 )
+# How much weight a source's text carries. Ordered, and CHECK-constrained for the same reason
+# `DocFormat` is: an unrecognised tier would silently rank as though it were the lowest, and
+# answering "what is required?" from a voluntary code is exactly the failure to prevent.
+# See `euaia.ingest.ec_documents.Authority`.
+Authority = Enum(
+    "law", "guidance", "code", name="authority", native_enum=False, create_constraint=True
+)
 CheckOutcome = Enum(
     "unchanged", "new_version", "error", name="check_outcome", native_enum=False
 )
@@ -75,6 +82,9 @@ class Source(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     publisher: Mapped[str] = mapped_column(Text, nullable=False)
     source_type: Mapped[str] = mapped_column(SourceType, nullable=False)
+    # Defaulted to the strictest tier: a source added without stating its authority is
+    # treated as binding, which is wrong loudly rather than wrong quietly.
+    authority: Mapped[str] = mapped_column(Authority, nullable=False, server_default="law")
 
     # EUR-Lex sources: the stable identifiers we resolve versions through.
     eli_uri: Mapped[str | None] = mapped_column(Text)

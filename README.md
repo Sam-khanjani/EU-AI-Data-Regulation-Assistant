@@ -9,6 +9,75 @@ in a regulated domain: answers are grounded in authoritative text, the system ab
 evidence is thin, every answer records which version of the law produced it, and the corpus
 can be safely re-ingested when the regulation changes.
 
+## The source
+
+At the centre of the corpus is one legal document, Regulation (EU) 2024/1689 — the EU AI Act
+— published on EUR-Lex under CELEX `32024R1689`:
+
+<https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:32024R1689>
+
+It is the authoritative text, and it covers:
+
+- definitions of AI systems
+- risk classifications
+- prohibited AI practices
+- high-risk AI requirements
+- transparency requirements
+- general-purpose AI requirements
+- provider and deployer obligations
+- governance
+- enforcement
+- penalties
+
+Those are the subjects the assistant can be asked about. Anything outside them — GDPR,
+national law, an article number that doesn't exist — is not in the corpus, and the system
+abstains rather than answering from the model's own memory.
+
+### Commission material, and why it is not treated as law
+
+The Commission also publishes guidelines, codes of practice and Q&A that interpret the Act,
+from its [AI Act page](https://digital-strategy.ec.europa.eu/en/policies/regulatory-framework-ai).
+Eleven of those are indexed alongside the Regulation — listed in
+`src/euaia/ingest/ec_documents.py`, downloaded into `data/raw/AI_Act/` by
+`uv run python -m euaia.ingest.ec_documents`, and ingested with the rest of the corpus.
+
+They are **not** equal to the Act, and the system does not treat them as such. Every source
+declares an authority tier:
+
+| Tier | What it is | What it can support |
+|---|---|---|
+| `law` | Regulation (EU) 2024/1689 | What is legally required |
+| `guidance` | Commission guidelines and Q&A | How the Commission interprets the Act |
+| `code` | Codes of practice | A voluntary way of demonstrating compliance |
+
+The distinction is load-bearing rather than decorative. Asked "what must I do?", a voluntary
+code of practice frequently out-ranks the provision it implements — it is longer, more
+concrete, and repeats the question's vocabulary — so similarity search alone would answer a
+question about legal obligations mostly out of a document that imposes none.
+
+So relevance decides which provisions survive retrieval, and authority decides what happens
+next: binding text is read first, each evidence block tells the answering model what kind of
+document it came from, and the model is instructed never to state a requirement on the
+strength of guidance or a code. An answer drawing on more than one tier is rendered under
+headings that say so:
+
+> **Legal requirement** — Article 50(2) requires providers to mark AI-generated content…
+>
+> **Commission guidance** — the transparency guidelines explain that this applies to…
+>
+> **Practical implementation** — the code of practice suggests…
+
+Each claim's tier is **computed from the quotes that survived verification**, not stated by
+the model — for the same reason the quotes themselves are checked rather than trusted.
+
+Three of the high-risk classification guidelines are **drafts** (published 19 May 2026 for
+consultation, final expected end of 2026). They are indexed, and their version label reads
+`draft 2026-05-19`, which reaches the evidence block so the answer can say so.
+
+Four further differences from the Act are measured and explained in `ec_documents.py`'s
+module docstring — no bookmark outline on one document, no article structure, no
+per-provision deep links, and no CELLAR version tracking. Read it before extending ingestion.
+
 ## How it works
 
 1. **Ingest** — the EU AI Act is pulled from EUR-Lex (CELLAR API) as PDF and parsed into its
@@ -38,7 +107,7 @@ still work on one self-contained question. Conversations are saved per user.
 
 | Layer | Choice |
 |---|---|
-| Source | EUR-Lex CELLAR REST + SPARQL, PDF (bookmark outline + preamble) |
+| Sources | EUR-Lex CELLAR (the Act) + European Commission guidelines, codes of practice and Q&A, ranked by authority |
 | Store | Postgres 17 + pgvector |
 | Embeddings | Gemini `gemini-embedding-001` |
 | Generation | Groq `openai/gpt-oss-120b`, structured output |
@@ -62,7 +131,9 @@ It runs hosted on OpenRouter by default, or locally; see [Reranker model](#reran
 
 ## Setup
 
-Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), and Docker.
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), and Docker. Every command below is
+the same on macOS, Linux and Windows — except copying the env file, where Windows needs
+`copy` (PowerShell: `Copy-Item`) in place of `cp`.
 
 ```bash
 cp .env.example .env      # then fill in GROQ_API_KEY, GOOGLE_API_KEY and OPENROUTER_API_KEY
@@ -71,15 +142,31 @@ docker compose up -d db
 uv run alembic upgrade head
 ```
 
-Ingest the corpus (add `--skip-embeddings` to parse and store structure without an API key):
+Then build the corpus, **in this order**. No source documents are stored in the repository;
+both steps fetch them, and both skip anything already on disk, so re-running is free.
 
 ```bash
+# 1. The AI Act, resolved and downloaded from EUR-Lex, then ingested.
+uv run python -m euaia.ingest.pipeline
+
+# 2. The Commission's guidelines, codes of practice and Q&A, downloaded into
+#    data/raw/AI_Act/. Run this AFTER step 1: it also places a copy of the Act
+#    alongside them, and that copy comes from the file step 1 downloaded.
+uv run python -m euaia.ingest.ec_documents
+
+# 3. Ingest what step 2 fetched. Step 1 had nothing to ingest for those sources yet.
 uv run python -m euaia.ingest.pipeline
 ```
 
-This registers two sources: `eu-ai-act`, the latest consolidated act (operative text with
-amendments applied), and `eu-ai-act-recitals`, the act as adopted (for its recitals, which
-consolidation doesn't restate).
+That registers thirteen sources. Two are the Act itself — `eu-ai-act`, the latest consolidated
+act (operative text with amendments applied), and `eu-ai-act-recitals`, the act as adopted
+(for its recitals, which consolidation doesn't restate). The other eleven are the Commission's
+material, described under [Commission material](#commission-material-and-why-it-is-not-treated-as-law).
+
+Steps 1 and 3 call the embedding API. A fresh machine needs about 780 embeddings against
+Gemini's free limit of 1,000 per day, so add `--resume 5` to wait out the limit rather than
+fail, or `--skip-embeddings` to parse and store the structure with no API key at all. Once
+embedded, the content-hash cache means re-ingesting unchanged text costs nothing.
 
 Set `CHAT_USERS` and `CHAINLIT_AUTH_SECRET` in `.env` (see `.env.example`), then start the
 chat and open <http://127.0.0.1:8001>:
@@ -111,11 +198,25 @@ Then open the chat at <http://127.0.0.1:8001>, or the admin dashboard at
 weights (~2.3 GB) on first start before it begins serving; follow it with
 `docker compose logs -f chat`. Later starts reuse them from a volume.
 
-Ingest the corpus once (and again whenever you want to pick up a new consolidated version):
+Build the corpus once, **in this order** (and repeat whenever you want to pick up a new
+consolidated version). Nothing is stored in the repository; each step fetches what it needs
+and skips whatever is already in the `euaia-raw` volume.
 
 ```bash
-docker compose --profile tools run --rm ingest
-docker compose --profile tools run --rm ingest --skip-embeddings   # structure only, no API key
+docker compose --profile tools run --rm ingest        # 1. the Act, from EUR-Lex
+docker compose --profile tools run --rm fetch-docs    # 2. the Commission's documents
+docker compose --profile tools run --rm ingest        # 3. index what step 2 fetched
+```
+
+Step 2 comes second because it also files a copy of the Act beside the Commission material,
+taken from what step 1 downloaded. Step 3 is what indexes them, since step 1 had nothing to
+index for those sources yet.
+
+Add `--skip-embeddings` to either `ingest` call to parse and store structure with no API key,
+or `--resume 5` to wait out the embedding quota instead of failing:
+
+```bash
+docker compose --profile tools run --rm ingest --skip-embeddings
 ```
 
 | Service | Role | Lifetime |

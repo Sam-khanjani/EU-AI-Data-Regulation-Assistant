@@ -62,6 +62,9 @@ class Candidate:
     document_version_id: int
     version_label: str
     source_key: str
+    authority: str
+    """``law`` | ``guidance`` | ``code`` -- see :data:`euaia.ingest.ec_documents.Authority`."""
+
     text: str
     """The structural unit's own text -- what quotes are verified against."""
 
@@ -90,6 +93,7 @@ class RetrievedUnit:
     document_version_id: int
     version_label: str
     source_key: str
+    authority: str
     deeplink: str | None
     score: float
     matched_chunk_ids: list[int] = field(default_factory=list)
@@ -112,7 +116,8 @@ _ACTIVE_CHUNKS = """
            su.eurlex_deeplink AS deeplink,
            dv.id           AS document_version_id,
            dv.version_label AS version_label,
-           s.key           AS source_key
+           s.key           AS source_key,
+           s.authority     AS authority
     FROM chunk c
     JOIN structural_unit su ON su.id = c.structural_unit_id
     JOIN document_version dv ON dv.id = c.document_version_id
@@ -289,6 +294,7 @@ def expand_to_units(
             document_version_id=candidate.document_version_id,
             version_label=candidate.version_label,
             source_key=candidate.source_key,
+            authority=candidate.authority,
             deeplink=candidate.deeplink,
             score=candidate.score,
             matched_chunk_ids=[candidate.chunk_id],
@@ -324,13 +330,21 @@ def _hydrate_units(session: Session, units: list[RetrievedUnit]) -> None:
         unit.heading = row["heading"]
         unit.text = row["text"]
         unit.deeplink = row["eurlex_deeplink"]
-        unit.citation_label = citation_label(row["unit_type"], row["unit_number"], row["unit_path"])
+        # source_key comes from the unit, not the row: it is already known from the candidate,
+        # and this query reads structural_unit alone.
+        unit.citation_label = citation_label(
+            row["unit_type"], row["unit_number"], row["unit_path"], unit.source_key
+        )
 
 
 def fit_token_budget(
     units: list[RetrievedUnit], budget: int, estimator=None
 ) -> list[RetrievedUnit]:
-    """Take units in rank order until the token budget is spent.
+    """Take units in the order given until the token budget is spent.
+
+    Callers pass them ordered by authority, so binding text has first claim on the budget and
+    guidance fills whatever is left. Spending in pure relevance order instead would let the
+    Act be reranked into the evidence and then dropped for want of room.
 
     Free-tier tokens-per-minute is the scarcest resource in the pipeline, and a single
     article can be 3,369 tokens. Without a budget, one long provision in the top results
@@ -338,8 +352,17 @@ def fit_token_budget(
     fewer, better provisions is the right trade: precision matters more than breadth once
     reranking has done its job.
 
-    A unit that alone exceeds the budget is still kept if it would otherwise be the only
-    evidence -- abstaining for lack of context we actually retrieved would be worse.
+    The first unit is kept even when it alone exceeds the budget -- abstaining for lack of
+    context we actually retrieved would be worse, and the provisions that matter most are
+    often the longest. Article 5 is 3,714 tokens against a 2,400 budget, and it is the whole
+    answer to "which practices are prohibited?"; dropping it in favour of two short recitals
+    that happen to fit would be a worse answer, not a cheaper one.
+
+    That exemption is safe only because callers order by authority first, which is what puts
+    a binding provision in the position that receives it. Ordered by relevance instead, it
+    would be handed to whatever scored highest -- including a Commission Q&A page, which has
+    no heading structure and is therefore a single ~5,700-token unit that would evict
+    everything else in the evidence set.
     """
     estimate = estimator or estimate_tokens
     kept: list[RetrievedUnit] = []
@@ -356,6 +379,27 @@ def fit_token_budget(
     return kept
 
 
+AUTHORITY_ORDER: tuple[str, ...] = ("law", "guidance", "code")
+"""Most authoritative first. See :data:`euaia.ingest.ec_documents.Authority`."""
+
+
+def by_authority(units: list[RetrievedUnit]) -> list[RetrievedUnit]:
+    """Re-order ranked units so binding text comes first, keeping rank within each tier.
+
+    Retrieval and reranking answer "what is most relevant?", which is the right question for
+    them and the wrong one to hand an answer model unmodified. Asked what the law requires,
+    a voluntary code of practice can easily out-rank the provision it implements: it is
+    longer, more concrete, and repeats the question's vocabulary. Whichever evidence block
+    lands at E1 is what the answer is built around.
+
+    So relevance decides *which* provisions survive, and this decides what order they are
+    read in. Nothing is dropped -- the guidance and the codes still reach the model, after
+    the law they are interpreting.
+    """
+    rank = {name: index for index, name in enumerate(AUTHORITY_ORDER)}
+    return sorted(units, key=lambda unit: rank.get(unit.authority, len(rank)))
+
+
 def label_units(units: list[RetrievedUnit]) -> list[RetrievedUnit]:
     """Assign E1, E2, ... in rank order.
 
@@ -366,8 +410,22 @@ def label_units(units: list[RetrievedUnit]) -> list[RetrievedUnit]:
     return [replace(unit, label=f"E{i}") for i, unit in enumerate(units, start=1)]
 
 
-def citation_label(unit_type: str, unit_number: str | None, unit_path: str) -> str:
-    """Human citation string, e.g. 'Article 6', 'Annex III', 'Recital 27'."""
+def citation_label(
+    unit_type: str, unit_number: str | None, unit_path: str, source_key: str = ""
+) -> str:
+    """Human citation string, e.g. 'Article 6', 'Annex III', 'GPAI Guidelines 2.1'.
+
+    A provision of the Act is cited by its number alone, because there is only one Act and
+    "Article 6" is how it is referred to everywhere. Everything else must name its document:
+    "Section 2.1" is meaningless across eleven Commission publications, and a reader has to be
+    able to see at a glance that a citation points at a voluntary code rather than at the law.
+    """
+    from euaia.ingest.sources import BY_KEY
+
+    spec = BY_KEY.get(source_key)
+    if spec and spec.authority != "law":
+        return f"{spec.doc_title} {unit_number}" if unit_number else spec.doc_title
+
     pretty = {
         "article": "Article",
         "annex": "Annex",
@@ -441,6 +499,7 @@ def _candidate(row) -> Candidate:
         document_version_id=row["document_version_id"],
         version_label=row["version_label"],
         source_key=row["source_key"],
+        authority=row["authority"],
         text=row["unit_text"],
         chunk_text=row["chunk_text"],
         token_count=row["chunk_tokens"],

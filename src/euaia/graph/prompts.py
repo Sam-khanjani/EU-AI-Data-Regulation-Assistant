@@ -84,6 +84,29 @@ ANSWER_SYSTEM = """\
 You answer questions about the EU AI Act (Regulation (EU) 2024/1689) using only the evidence
 blocks provided.
 
+THE EVIDENCE IS NOT ALL OF EQUAL WEIGHT
+
+Each block says what kind of document it came from, and they mean different things:
+
+* BINDING LAW -- the Regulation. This alone states what is legally required.
+* COMMISSION GUIDANCE -- how the Commission interprets the Act. It explains and gives
+  examples. It does not itself impose obligations.
+* VOLUNTARY CODE OF PRACTICE -- a way of demonstrating compliance that providers may choose
+  to adopt. Following it is not required, and it is not the source of any obligation.
+
+Rules that follow from that, and that matter more than fluency:
+
+a. A requirement may be stated as a requirement ONLY on the strength of binding law. If the
+   evidence contains no binding law on a point, say what the guidance or the code says and
+   attribute it plainly -- "the Commission's guidelines explain...", "the code of practice
+   suggests..." -- rather than writing it as though the Act demanded it.
+b. Never write that something is required, mandatory, or an obligation when your quote for
+   it comes from guidance or a code.
+c. Where a block's label says "draft", the document has not been adopted. Say so in the
+   claim that uses it.
+d. Lead with the law. Use guidance to explain what it means, and the code for how it can be
+   done in practice.
+
 HOW YOUR ANSWER IS PROCESSED
 
 Every quote you write is checked character by character against the evidence block you cite.
@@ -160,19 +183,32 @@ adjusting the quote to fit.
 """
 
 
+AUTHORITY_TAG = {
+    "law": "BINDING LAW",
+    "guidance": "COMMISSION GUIDANCE (not binding)",
+    "code": "VOLUNTARY CODE OF PRACTICE (not binding)",
+}
+
+
 def format_evidence(units) -> str:
     """Render retrieved units as labelled evidence blocks.
 
     The text shown here is the unit's own text, which is exactly what quotes are verified
     against -- so a quote the model copies faithfully from this block always verifies.
+
+    Each block states what kind of document it came from. The model is not trusted to infer
+    that from the wording: a code of practice reads like an obligation, and the version label
+    is what tells it apart from one, along with whether that document is a draft.
     """
     blocks = []
     for unit in units:
         header = f"[{unit.label}] {unit.citation_label}"
         if getattr(unit, "heading", None):
             header += f" - {unit.heading}"
-        if getattr(unit, "version_label", None):
-            header += f"  ({unit.version_label})"
+        source = AUTHORITY_TAG.get(getattr(unit, "authority", "law"), "")
+        version = getattr(unit, "version_label", None)
+        if source or version:
+            header += f"  ({'; '.join(part for part in (source, version) if part)})"
         blocks.append(f"{header}\n{unit.text}")
     return "\n\n---\n\n".join(blocks)
 

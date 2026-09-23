@@ -213,3 +213,39 @@
   question: How many companies have been fined under the AI Act so far?
   should_abstain: true
   notes: A factual question about the world, not about the Regulation's text.
+
+# --- Authority tiering ----------------------------------------------------------------
+# Added when the Commission's guidelines, codes of practice and Q&A entered the corpus.
+# These questions all have strong non-binding matches, so they measure whether the Act is
+# still what the answer rests on. Recall is scored on cited *Articles*, so a citation of a
+# guideline or a code contributes nothing to it -- which is exactly the property under test.
+
+- id: transparency-marking-duty
+  category: lookup
+  question: What must providers do about AI-generated content so people can tell it is synthetic?
+  expected_articles: ["50"]
+  should_abstain: false
+  notes: >-
+    The transparency guidelines (51pp) and the marking code of practice (38pp) both describe
+    this at far greater length than Article 50 does, in the words the question uses. If the
+    reserved law slot works, Article 50 is still cited; if it does not, the answer is
+    assembled entirely out of non-binding material and recall drops to zero.
+
+- id: gpai-provider-duties
+  category: lookup
+  question: What obligations apply to providers of general-purpose AI models?
+  expected_articles: ["53"]
+  should_abstain: false
+  notes: >-
+    The GPAI guidelines and all three chapters of the GPAI code compete here. Article 53 is
+    the provision that actually imposes the obligations.
+
+- id: copyright-policy-requirement
+  category: lookup
+  question: Is a copyright policy required for general-purpose AI models, or only recommended?
+  expected_articles: ["53"]
+  should_abstain: false
+  notes: >-
+    Directly probes the tier distinction. The Copyright chapter of the code is voluntary;
+    Article 53(1)(c) is what makes a policy mandatory. An answer that presents the code's
+    measures as the requirement is wrong even though every quote in it verifies.

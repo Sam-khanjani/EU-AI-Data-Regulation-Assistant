@@ -77,6 +77,7 @@ def ensure_source(session: Session, spec: SourceSpec) -> Source:
     source.title = spec.title
     source.publisher = spec.publisher
     source.source_type = spec.source_type
+    source.authority = spec.authority
     source.eli_uri = spec.eli_uri
     source.celex_base = spec.celex_base
     source.landing_url = spec.landing_url
@@ -88,9 +89,56 @@ def ensure_source(session: Session, spec: SourceSpec) -> Source:
 
 def resolve_target(client: CellarClient, spec: SourceSpec) -> VersionRef:
     """Which version of this source should be live?"""
+    if spec.local_file:
+        return local_version(spec)
     if spec.use_consolidated:
         return client.latest_consolidated(spec.celex_base or "")
     return client.resolve_base_work(spec.celex_base or "")
+
+
+def local_version(spec: SourceSpec) -> VersionRef:
+    """A version reference for a source read from disk rather than resolved over SPARQL.
+
+    The Commission publishes no CELEX and no version identifier of any kind, so the source
+    key stands in as the stable per-document id and ``content_sha256`` carries the actual
+    change signal. The label is fixed on the spec, which is how a draft stays labelled as one
+    all the way into the evidence block the answer model reads.
+    """
+    return VersionRef(
+        cellar_id="",
+        celex=spec.key,
+        doc_date=dt.date.fromisoformat(spec.doc_date) if spec.doc_date else None,
+        is_consolidated=False,
+    )
+
+
+def fetch_local_content(spec: SourceSpec) -> tuple[Manifestation, Path]:
+    """Read a downloaded Commission document off disk."""
+    path = settings.raw_data_dir / (spec.local_file or "")
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{spec.key}: {path} is missing; run 'python -m euaia.ingest.ec_documents' first"
+        )
+    content = path.read_bytes()
+    log.info("Reading %s (%d bytes)", path.name, len(content))
+    return (
+        Manifestation(
+            content=content,
+            fmt="pdf",
+            sha256=hashlib.sha256(content).hexdigest(),
+            filename=path.name,
+        ),
+        path,
+    )
+
+
+def fetch_content(
+    client: CellarClient, spec: SourceSpec, ref: VersionRef
+) -> tuple[Manifestation, Path]:
+    """Get a source's bytes, from disk for Commission material and from CELLAR otherwise."""
+    if spec.local_file:
+        return fetch_local_content(spec)
+    return fetch_pdf_content(client, ref)
 
 
 def fetch_pdf_content(
@@ -128,6 +176,7 @@ def fetch_pdf_content(
 _PARSERS: dict[str, Callable[[bytes], ParsedDocument]] = {
     "pdf_outline": pdf.parse_consolidated,
     "pdf_preamble": pdf.parse_recitals,
+    "pdf_sections": pdf.parse_sections,
 }
 
 
@@ -206,13 +255,13 @@ def _ingest_source_locked(
 
     with CellarClient() as client:
         ref = resolve_target(client, spec)
-        manifestation, _ = fetch_pdf_content(client, ref)
+        manifestation, _ = fetch_content(client, spec, ref)
 
     # Every reader here expects PDF bytes. Fail before handing them something else rather
     # than during parsing, where the error would name a symptom instead of the cause.
     if manifestation.fmt != "pdf":
         raise RuntimeError(
-            f"{spec.key}: expected a PDF from CELLAR, got {manifestation.fmt!r}. "
+            f"{spec.key}: expected a PDF, got {manifestation.fmt!r}. "
             "Ingesting would run a PDF reader over bytes that are not a PDF."
         )
 
@@ -264,7 +313,7 @@ def _ingest_source_locked(
         return IngestResult(
             source_key=spec.key,
             status="quota-exhausted",
-            version_label=ref.label,
+            version_label=spec.fixed_version_label or ref.label,
             celex=ref.celex,
             detail=str(exc),
         )
@@ -279,7 +328,7 @@ def _ingest_source_locked(
     return IngestResult(
         source_key=spec.key,
         status="ingested",
-        version_label=ref.label,
+        version_label=spec.fixed_version_label or ref.label,
         celex=ref.celex,
         units=units,
         chunks=chunks,
@@ -310,7 +359,7 @@ def _create_version(
             StructuralUnit.document_version_id == version.id
         ).delete()
 
-    version.version_label = ref.label
+    version.version_label = spec.fixed_version_label or ref.label
     version.cellar_id = ref.cellar_id
     version.doc_date = ref.doc_date
     version.retrieved_at = dt.datetime.now(dt.UTC)
@@ -336,7 +385,7 @@ def _ingest_content(
 
     with session_scope() as session:
         version = _pending_version(session, spec.key, ref.celex)
-        path_to_id = _write_units(session, version, doc, ref, spec.unit_types)
+        path_to_id = _write_units(session, version, doc, ref, spec.unit_types, spec)
 
         if skip_embeddings:
             log.warning("skip-embeddings: %d chunks left unembedded", len(drafts))
@@ -397,12 +446,27 @@ def _selected_units(doc: ParsedDocument, unit_types: frozenset[str] | None) -> l
     return [u for u in doc.units if u.unit_path in keep]
 
 
+def _unit_link(spec: SourceSpec, ref: VersionRef, unit) -> str | None:
+    """Where a reader goes to check this unit against its source.
+
+    EUR-Lex renders every provision at a stable anchored URL, which is what makes a citation
+    checkable rather than merely attributed. The Commission publishes PDFs with no anchors
+    and no CELEX, so the honest answer for those is the page the document was published on.
+    Building a EUR-Lex URL out of the synthetic CELEX would produce a link that looks
+    authoritative and 404s, which is worse than no link at all.
+    """
+    if spec.local_file:
+        return spec.landing_url
+    return deeplink(ref.celex, unit.unit_type, unit.unit_number, unit.unit_path)
+
+
 def _write_units(
     session: Session,
     version: DocumentVersion,
     doc: ParsedDocument,
     ref: VersionRef,
     unit_types: frozenset[str] | None = None,
+    spec: SourceSpec | None = None,
 ) -> dict[str, int]:
     """Persist the structural tree, resolving parent links by path.
 
@@ -426,8 +490,10 @@ def _write_units(
                 text_normalized=normalize_text(unit.text),
                 ordinal=unit.ordinal,
                 page=unit.page,
-                eurlex_deeplink=deeplink(
-                    ref.celex, unit.unit_type, unit.unit_number, unit.unit_path
+                eurlex_deeplink=(
+                    _unit_link(spec, ref, unit)
+                    if spec
+                    else deeplink(ref.celex, unit.unit_type, unit.unit_number, unit.unit_path)
                 ),
             )
         )
@@ -552,25 +618,44 @@ def check_source(session: Session, spec: SourceSpec, client: CellarClient) -> Ch
     )
     active_celex = active.celex if active else None
 
-    try:
-        ref = resolve_target(client, spec)
-    except CellarError as exc:
-        result = CheckResult(
-            source_key=spec.key,
-            outcome="error",
-            active_celex=active_celex,
-            latest_celex=None,
-            detail=str(exc),
-        )
+    if spec.local_file:
+        # Commission material has no CELEX to compare and is revised in place under a stable
+        # URL, so a changed CELEX can never be the signal -- the bytes are. Re-download first
+        # (`python -m euaia.ingest.ec_documents --refresh`) or this compares the file we
+        # already have against itself and always reports unchanged.
+        try:
+            manifestation, _ = fetch_local_content(spec)
+        except FileNotFoundError as exc:
+            result = CheckResult(spec.key, "error", active_celex, None, str(exc))
+        else:
+            changed = active is None or active.content_sha256 != manifestation.sha256
+            result = CheckResult(
+                source_key=spec.key,
+                outcome="new_version" if changed else "unchanged",
+                active_celex=active_celex,
+                latest_celex=spec.key,
+                detail="the downloaded file differs from the active version" if changed else "",
+            )
     else:
-        outcome = "unchanged" if ref.celex == active_celex else "new_version"
-        result = CheckResult(
-            source_key=spec.key,
-            outcome=outcome,
-            active_celex=active_celex,
-            latest_celex=ref.celex,
-            detail=f"latest is {ref.label}" if ref.doc_date else "",
-        )
+        try:
+            ref = resolve_target(client, spec)
+        except CellarError as exc:
+            result = CheckResult(
+                source_key=spec.key,
+                outcome="error",
+                active_celex=active_celex,
+                latest_celex=None,
+                detail=str(exc),
+            )
+        else:
+            outcome = "unchanged" if ref.celex == active_celex else "new_version"
+            result = CheckResult(
+                source_key=spec.key,
+                outcome=outcome,
+                active_celex=active_celex,
+                latest_celex=ref.celex,
+                detail=f"latest is {ref.label}" if ref.doc_date else "",
+            )
 
     session.add(
         CheckRun(
@@ -757,14 +842,16 @@ def _fetch_pdf(keys: list[str]) -> int:
             spec = sources.get(key)
             try:
                 ref = resolve_target(client, spec)
-                manifestation, path = fetch_pdf_content(client, ref)
+                manifestation, path = fetch_content(client, spec, ref)
             except Exception as exc:  # noqa: BLE001
                 failures += 1
                 log.exception("PDF fetch failed for %s", key)
                 print(f"{key}: FAILED - {exc}", file=sys.stderr)
                 continue
             size = f"{len(manifestation.content):,} bytes"
-            print(f"{spec.key:24s} {ref.label}")
+            # Commission sources are read from disk rather than downloaded here; this reports
+            # what `python -m euaia.ingest.ec_documents` already put there.
+            print(f"{spec.key:24s} {spec.fixed_version_label or ref.label}")
             print(f"{'':24s} {size}  sha256={manifestation.sha256[:16]}")
             print(f"{'':24s} {path}")
     return 1 if failures else 0
@@ -777,7 +864,7 @@ def _estimate(keys: list[str]) -> int:
         for key in keys:
             spec = sources.get(key)
             ref = resolve_target(client, spec)
-            manifestation, _ = fetch_pdf_content(client, ref)
+            manifestation, _ = fetch_content(client, spec, ref)
             doc = parse_content(spec, manifestation)
             drafts = chunk_document(doc, spec.doc_title or spec.title, spec.unit_types)
             estimate = embeddings.plan([d.text for d in drafts])

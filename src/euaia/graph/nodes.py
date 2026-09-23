@@ -46,6 +46,7 @@ from euaia.llm.schemas import (
 )
 from euaia.retrieval.hybrid import (
     RetrievedUnit,
+    by_authority,
     expand_to_units,
     fit_token_budget,
     label_units,
@@ -198,7 +199,12 @@ def rerank_evidence(state: QueryState, session: Session) -> QueryState:
 
     state.note("expanding", f"reading {len(result.kept)} provisions in full")
     units = expand_to_units(session, result.kept)
-    units = fit_token_budget(units, settings.evidence_token_budget)
+    # Authority orders the units *before* the budget is spent, not after. Ordering afterwards
+    # looks equivalent and is not: reranking reserves a slot for binding text but appends it
+    # last, so spending the budget in relevance order let a long provision like Article 50 be
+    # promoted into the evidence and then dropped for want of room -- leaving an answer about
+    # legal obligations resting entirely on guidance and a voluntary code.
+    units = fit_token_budget(by_authority(units), settings.evidence_token_budget)
     state.retrieved = units
     state.evidence = _fit_to_prompt_budget(label_units(units), state)
     return state
@@ -308,6 +314,7 @@ def _evidence_records(state: QueryState) -> list[Evidence]:
             deeplink=unit.deeplink,
             document_version_id=unit.document_version_id,
             version_label=unit.version_label,
+            authority=unit.authority,
         )
         for unit in state.evidence
     ]

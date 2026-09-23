@@ -223,11 +223,43 @@ def rerank(
         len(scored), elapsed_ms, len(passing), threshold, best,
     )
     return RerankResult(
-        kept=[lc.candidate for lc in passing[:keep]],
+        kept=_keep_with_law(passing, keep),
         best_score=best,
         scored=len(scored),
         latency_ms=elapsed_ms,
     )
+
+
+def _keep_with_law(passing: list[LabelledChunk], keep: int) -> list[Candidate]:
+    """The best-scoring candidates, but never without the binding text if it ranked at all.
+
+    Ordering evidence by authority is not enough on its own, because it can only order what
+    survived: with the Commission's guidelines and codes in the corpus, the top of a purely
+    relevance-ranked list can be entirely non-binding. Those documents explain the Act in the
+    same words a user asks about it, at far greater length than the provision itself, so on a
+    question like "what must a chatbot tell its users?" they out-score Article 50 on their
+    way to describing it.
+
+    Answering that from guidance alone would not be false, but it would be the wrong kind of
+    answer -- and no amount of citation verification would catch it, because every quote in
+    it is genuine. So one slot is reserved: if no binding provision is in the top ``keep``
+    and one passed the threshold lower down, it displaces the weakest of them. A single slot,
+    not a quota -- where guidance really is the better evidence it still takes the rest.
+    """
+    chosen = passing[:keep]
+    if not chosen or any(lc.candidate.authority == "law" for lc in chosen):
+        return [lc.candidate for lc in chosen]
+
+    promoted = next((lc for lc in passing[keep:] if lc.candidate.authority == "law"), None)
+    if promoted is None:
+        return [lc.candidate for lc in chosen]
+
+    log.info(
+        "No binding provision in the top %d; promoting %s (%.4f) over %s (%.4f)",
+        keep, promoted.candidate.unit_path, promoted.score or 0.0,
+        chosen[-1].candidate.unit_path, chosen[-1].score or 0.0,
+    )
+    return [lc.candidate for lc in chosen[:-1]] + [promoted.candidate]
 
 
 def score_passages(

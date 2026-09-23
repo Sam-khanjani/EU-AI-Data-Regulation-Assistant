@@ -14,7 +14,7 @@ import secrets
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from euaia.api.service import AnswerView, Citation
+from euaia.api.service import AnswerClaim, AnswerView, Citation
 from euaia.graph.state import Progress, Turn
 
 EXAMPLE_QUESTIONS = [
@@ -73,6 +73,38 @@ def check_login(username: str, password: str, users: str) -> bool:
 # ------------------------------------------------------------------------ the answer
 
 
+BASIS_HEADINGS = (
+    ("law", "Legal requirement"),
+    ("guidance", "Commission guidance"),
+    ("code", "Practical implementation"),
+)
+"""Headings for the three kinds of document a claim can rest on, strongest first.
+
+Shown because the difference changes what the reader should do. "The Act requires this" and
+"a voluntary code suggests this" are not the same statement, and rendering them as one
+undifferentiated list of claims invites reading the second as the first.
+"""
+
+
+def _grouped_claims(claims: list[AnswerClaim]) -> list[str]:
+    """Claims under a heading naming what they stand on, in order of authority.
+
+    A heading is only written when the answer actually draws on more than one kind of
+    document -- most answers come wholly from the Act, and labelling those "Legal
+    requirement" would add ceremony to every reply to distinguish it from nothing.
+    """
+    grouped = {name: [c for c in claims if c.basis == name] for name, _ in BASIS_HEADINGS}
+    used = [(name, heading) for name, heading in BASIS_HEADINGS if grouped[name]]
+    if len(used) < 2:
+        return [_with_citations(claim.text, claim.citations) for claim in claims]
+
+    parts: list[str] = []
+    for name, heading in used:
+        parts.append(f"**{heading}**")
+        parts.extend(_with_citations(c.text, c.citations) for c in grouped[name])
+    return parts
+
+
 def answer_markdown(view: AnswerView) -> str:
     """The reply, as Markdown."""
     if view.verdict == "abstained":
@@ -104,7 +136,7 @@ def answer_markdown(view: AnswerView) -> str:
             body = _with_citations(criterion["explanation"], criterion["citations"])
             parts.append(f"{head}  \n{body}")
     else:
-        parts.extend(_with_citations(claim.text, claim.citations) for claim in view.claims)
+        parts.extend(_grouped_claims(view.claims))
 
     if view.follow_up_questions:
         parts.append("**To take this further, you would need to answer:**")

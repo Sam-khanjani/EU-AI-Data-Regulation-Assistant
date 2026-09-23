@@ -42,6 +42,9 @@ class Citation:
 class AnswerClaim:
     text: str
     citations: list[Citation] = field(default_factory=list)
+    basis: str = "law"
+    """Which kind of document this claim's verified quotes came from -- ``law``, ``guidance``
+    or ``code``. Computed from those quotes, never stated by the model."""
 
 
 @dataclass(slots=True)
@@ -109,6 +112,7 @@ def answer_payload(view: AnswerView) -> dict[str, Any]:
         "claims": [
             {
                 "text": claim.text,
+                "basis": claim.basis,
                 "citations": [
                     {
                         "citation": c.citation_label,
@@ -180,6 +184,7 @@ def _to_view(state: QueryState) -> AnswerView:
                 AnswerClaim(
                     text=claim.text,
                     citations=[_citation(q, versions) for q in claim.quotes],
+                    basis=claim.basis,
                 )
                 for claim in report.claims
             ]
@@ -278,6 +283,7 @@ def corpus_status(session: Session) -> list[dict[str, Any]]:
                 "key": source.key,
                 "title": source.title,
                 "publisher": source.publisher,
+                "authority": source.authority,
                 "landing_url": source.landing_url,
                 "version_label": version.version_label,
                 "celex": version.celex,

@@ -1,15 +1,18 @@
-"""Read EUR-Lex PDFs into the legal units the rest of ingestion works with.
+"""Read the corpus' PDFs into the units the rest of ingestion works with.
 
-The two documents are published differently, so there are two readers:
+Each kind of document is published differently, so there is a reader per kind:
 
 * :func:`parse_consolidated` reads the consolidated act -- chapters, sections, articles,
   paragraphs and annexes -- from the bookmark outline its PDF carries.
 * :func:`parse_recitals` reads the recitals from the as-adopted act's preamble, which has no
   outline to read.
+* :func:`parse_sections` reads the Commission's guidelines, codes of practice and Q&A, which
+  are not legislation and have no articles -- only numbered sections, and sometimes not even
+  those.
 
-Both return a :class:`ParsedDocument`, so the chunker and the pipeline never need to know
-which one ran. The sections below follow that order: the shared shape, the outline, the
-consolidated reader, the recitals reader.
+All return a :class:`ParsedDocument`, so the chunker and the pipeline never need to know which
+one ran. The sections below follow that order: the shared shape, the outline, the consolidated
+reader, the recitals reader, the section reader.
 """
 
 from __future__ import annotations
@@ -17,8 +20,9 @@ from __future__ import annotations
 import io
 import logging
 import re
+from bisect import bisect_left
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import count
 
 import pdfplumber
@@ -713,4 +717,247 @@ def parse_recitals(pdf_bytes: bytes, *, expected: int | None = None) -> ParsedDo
         )
 
     log.info("Parsed PDF preamble: %d recitals (1..%s)", len(units), units[-1].unit_number)
+    return ParsedDocument(units=units)
+
+
+# --------------------------------------------------------------------- sections
+# Read the Commission's guidelines, codes of practice and Q&A. These are not legislation and
+# are not shaped like it: no articles or annexes, just decimal-numbered sections ("2.3.1."),
+# or Commitments and Measures in the codes. So everything becomes a `section` unit and the
+# hierarchy comes from the document's own outline nesting rather than from parsed numbering.
+
+_SECTION_NUMBER = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+(\S.*)$")
+# Table-of-contents rows ("2.5. Interplay with ... ....... 9") match the heading pattern too.
+_TOC_LINE = re.compile(r"\.{4,}\s*\d+\s*$|\s\d{1,3}$")
+_MAX_HEADING_CHARS = 120
+_NEEDLE_CHARS = 40
+MIN_SECTIONS = 5
+_MIN_PAGE_SPAN = 0.5
+"""How the heading scan is judged to have failed, after which the document is kept whole
+rather than sliced on whatever few lines happened to match: too few headings, or headings
+that do not reach across the document."""
+
+
+def _plain_lines(pdf: pdfplumber.PDF) -> list[_Line]:
+    """Page text as lines. No noise filtering: these are not EUR-Lex typeset documents."""
+    return [
+        _Line(text=stripped, page=page.page_number)
+        for page in pdf.pages
+        for raw in (page.extract_text() or "").split("\n")
+        if (stripped := raw.strip())
+    ]
+
+
+def _collapse(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def _numbered(title: str) -> tuple[str | None, str]:
+    """``'2.3.1. Classification'`` -> ``('2.3.1', 'Classification')``; else ``(None, title)``."""
+    if match := _SECTION_NUMBER.match(title):
+        return match.group(1), match.group(2).strip()
+    return None, title
+
+
+def _as_tuple(number: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in number.split("."))
+
+
+def _headings_from_text(lines: list[_Line]) -> list[OutlineEntry]:
+    """Numbered headings read from the body, for documents published without an outline.
+
+    Depth comes from the numbering itself -- ``2.3.1`` is three levels down -- which is more
+    reliable here than in the Act, because these documents number their headings consistently
+    and the numbering is the only structure they have.
+
+    Two things are rejected, both of which produced nonsense before they were: a contents
+    page, whose rows carry the same numbering as the real headings, and numbered *list* items,
+    which are everywhere in the Q&A. A contents row is dropped by keeping the last occurrence
+    of each number, since the contents always precede the body; a list item is dropped by
+    requiring the text to read like a title.
+    """
+    candidates: dict[str, tuple[int, OutlineEntry]] = {}
+    for index, line in enumerate(lines):
+        if len(line.text) > _MAX_HEADING_CHARS or _TOC_LINE.search(line.text):
+            continue
+        number, heading = _numbered(line.text)
+        # A heading opens with a capital and does not run on into the next clause.
+        if not number or not heading[:1].isupper() or heading.endswith((";", ",")):
+            continue
+        candidates[number] = (
+            index,
+            OutlineEntry(
+                level=number.count(".") + 1,
+                unit_type="section",
+                unit_number=number,
+                heading=heading,
+                page=line.page,
+                title=line.text,
+            ),
+        )
+    # Re-sorted by where the *kept* occurrence sits: a dict preserves first-insertion order,
+    # which is the contents page, so without this every body heading would arrive in contents
+    # order and the monotonic filter would discard almost all of them.
+    ordered = [entry for _, entry in sorted(candidates.values(), key=lambda pair: pair[0])]
+    return _monotonic(ordered)
+
+
+def _monotonic(entries: list[OutlineEntry]) -> list[OutlineEntry]:
+    """The largest subset whose numbering only increases, in document order.
+
+    Real headings ascend; a numbered list inside a section, or a contents row that escaped
+    the filter above, breaks the run. Taking the *longest* increasing subsequence rather than
+    scanning greedily from the first entry matters because the first entry is the likeliest
+    to be the stray one -- a single leaked contents row at the front would otherwise discard
+    every genuine heading numbered below it.
+    """
+    numbers = [_as_tuple(e.unit_number) for e in entries if e.unit_number]
+    if not numbers:
+        return []
+
+    tails: list[int] = []  # index, per run length, of the smallest number ending such a run
+    previous = [-1] * len(numbers)
+    for index, number in enumerate(numbers):
+        position = bisect_left([numbers[t] for t in tails], number)
+        if position:
+            previous[index] = tails[position - 1]
+        if position == len(tails):
+            tails.append(index)
+        else:
+            tails[position] = index
+
+    run: list[OutlineEntry] = []
+    cursor = tails[-1]
+    while cursor != -1:
+        run.append(entries[cursor])
+        cursor = previous[cursor]
+    return run[::-1]
+
+
+def _section_entries(lines: list[_Line], document: PDFDocument) -> list[OutlineEntry]:
+    """The document's own outline where it has one, otherwise headings read from the text.
+
+    Outline titles are re-split here so a published ``2.1.`` becomes the unit's number rather
+    than being replaced by its position: the numbering is what a reader would cite.
+    """
+    outline = [entry for entry in read_outline(document) if entry.title]
+    if len(outline) >= MIN_SECTIONS:
+        return [
+            replace(entry, unit_number=number, heading=heading)
+            for entry in outline
+            for number, heading in [_numbered(entry.title)]
+        ]
+    return _headings_from_text(lines)
+
+
+def _locate_heading(lines: list[_Line], entry: OutlineEntry, after: int) -> int | None:
+    """Index of the line carrying this heading, scanned forward from ``after``.
+
+    Matched on the heading text rather than on a synthesised label: unlike ``Article 6``,
+    these headings have no predictable form. A bookmark title and its typeset line can differ
+    in trailing punctuation and can wrap, so the comparison is prefix-based in both
+    directions.
+    """
+    needle = _collapse(entry.title)[:_NEEDLE_CHARS]
+    if not needle:
+        return None
+    limit = entry.page + 1 if entry.page else None
+
+    for index in range(after, len(lines)):
+        line = lines[index]
+        if entry.page and line.page < entry.page:
+            continue
+        if limit and line.page > limit:
+            break
+        text = _collapse(line.text)
+        if text.startswith(needle) or (text and needle.startswith(text)):
+            return index
+    return None
+
+
+def parse_sections(pdf_bytes: bytes) -> ParsedDocument:
+    """Parse a Commission publication into ``section`` units.
+
+    Falls back to one unit for the whole document when too few headings are found. That is a
+    real outcome rather than an error: the Q&A pages are rendered from HTML and carry no
+    heading structure at all, and a single correctly-attributed unit is better than slicing
+    on whatever lines happened to match. The chunker splits it either way.
+    """
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        lines = _plain_lines(pdf)
+    if not lines:
+        raise PdfParseError("PDF has no extractable text")
+
+    entries = _section_entries(lines, PDFDocument(PDFParser(io.BytesIO(pdf_bytes))))
+
+    located: list[tuple[OutlineEntry, int]] = []
+    cursor = 0
+    for entry in entries:
+        index = _locate_heading(lines, entry, cursor)
+        if index is None:
+            continue
+        located.append((entry, index))
+        cursor = index + 1
+
+    # Headings that cluster on a couple of pages are a numbered list inside one section, not
+    # the document's structure. Slicing on those would attribute most of the text to whatever
+    # fragment happened to precede it, so the document is kept whole instead.
+    pages = lines[-1].page
+    spanned = located[-1][0].page and located[0][0].page
+    if spanned and (located[-1][0].page - located[0][0].page) < _MIN_PAGE_SPAN * pages:
+        located = []
+
+    if len(located) < MIN_SECTIONS:
+        log.info("No usable heading structure (%d found); keeping document whole", len(located))
+        return ParsedDocument(
+            units=[
+                ParsedUnit(
+                    unit_type="section",
+                    unit_number=None,
+                    unit_path="SEC_1",
+                    heading=None,
+                    text=_join(lines),
+                    ordinal=1,
+                    parent_path=None,
+                    page=lines[0].page,
+                )
+            ]
+        )
+
+    ordinals = count(1)
+    units: list[ParsedUnit] = []
+    stack: list[tuple[int, ParsedUnit]] = []
+    seen: set[str] = set()
+
+    for position, (entry, index) in enumerate(located):
+        end = located[position + 1][1] if position + 1 < len(located) else len(lines)
+
+        while stack and stack[-1][0] >= entry.level:
+            stack.pop()
+        parent = stack[-1][1] if stack else None
+
+        # Numbering is the stable part of a heading; where there is none (the codes name
+        # their units "Commitment 1"), position stands in so the path is still unique.
+        number = entry.unit_number or str(position + 1)
+        prefix = f"SEC_{number}"
+        path = f"{parent.unit_path}/{prefix}" if parent else prefix
+        while path in seen:  # repeated numbering across parts of one document
+            prefix += "_"
+            path = f"{parent.unit_path}/{prefix}" if parent else prefix
+        seen.add(path)
+
+        unit = ParsedUnit(
+            unit_type="section",
+            unit_number=entry.unit_number,
+            unit_path=path,
+            heading=entry.heading or entry.title,
+            text=_join(lines[index:end]),
+            ordinal=next(ordinals),
+            parent_path=parent.unit_path if parent else None,
+            page=entry.page,
+        )
+        units.append(unit)
+        stack.append((entry.level, unit))
+
+    log.info("Parsed PDF: %d sections", len(units))
     return ParsedDocument(units=units)

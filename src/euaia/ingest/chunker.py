@@ -40,9 +40,11 @@ from euaia.ingest.pdf import ParsedDocument, ParsedUnit
 
 log = logging.getLogger(__name__)
 
-# Unit types worth embedding. Chapters and sections are headings only -- their substance
-# lives in the articles beneath them, so embedding them would just add near-duplicates.
-_EMBEDDABLE = frozenset({"paragraph", "article", "recital", "annex"})
+# Unit types worth embedding. What a `section` means depends on the document: in the Act it
+# is a heading whose substance lives in the articles beneath it, so embedding it would add
+# near-duplicates -- which is why the Act names its own types explicitly. In the Commission's
+# guidelines and codes there are no articles and the section *is* the text.
+_EMBEDDABLE = frozenset({"paragraph", "article", "recital", "annex", "section"})
 
 # Tokens reserved between the breadcrumb and the body.
 _SEPARATOR_TOKENS = 8

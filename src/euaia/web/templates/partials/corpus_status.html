@@ -17,7 +17,7 @@
   <table class="corpus">
     <thead>
       <tr>
-        <th>Source</th><th>Version</th><th>CELEX</th><th>Format</th>
+        <th>Source</th><th>Authority</th><th>Version</th><th>CELEX</th><th>Format</th>
         <th class="num">Chunks</th><th>Ingested</th><th>Content hash</th>
         <th>Last checked</th>
       </tr>
@@ -31,6 +31,7 @@
           {% else %}{{ s.title }}{% endif %}
           <div class="muted small">{{ s.publisher }}</div>
         </td>
+        <td><span class="pill {{ 'good' if s.authority == 'law' else '' }}">{{ s.authority }}</span></td>
         <td>
           {{ s.version_label }}
           {% if not s.embedded %}<span class="pill bad">not embedded</span>{% endif %}
@@ -56,7 +57,7 @@
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="8" class="muted">
+      <tr><td colspan="9" class="muted">
         Nothing ingested. Run <code>uv run python -m euaia.ingest.pipeline</code>.
       </td></tr>
       {% endfor %}

@@ -85,6 +85,9 @@ class Evidence:
     deeplink: str | None = None
     document_version_id: int | None = None
     version_label: str | None = None
+    authority: str = "law"
+    """Which tier this unit's document sits in. Defaulted to the strictest: a source that
+    never declared one is treated as binding rather than quietly discounted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +105,7 @@ class VerifiedQuote:
     score: float
     deeplink: str | None = None
     document_version_id: int | None = None
+    authority: str = "law"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +124,23 @@ class VerifiedClaim:
     @property
     def is_supported(self) -> bool:
         return bool(self.quotes)
+
+    @property
+    def basis(self) -> str:
+        """What kind of document this claim actually stands on.
+
+        Derived from the quotes that survived verification rather than asked of the model,
+        for the same reason the quotes themselves are checked rather than trusted: a model
+        that can mislabel a voluntary code as a legal requirement is exactly the failure
+        this distinction exists to prevent. The strongest tier among the surviving quotes
+        wins -- a claim carrying a quote from the Act is grounded in the Act, whatever else
+        it also cites.
+        """
+        tiers = {quote.authority for quote in self.quotes}
+        for name in ("law", "guidance", "code"):
+            if name in tiers:
+                return name
+        return "law"
 
 
 @dataclass(slots=True)
@@ -228,6 +249,7 @@ def verify_quote(quote: str, evidence: Evidence) -> VerifiedQuote | RejectedQuot
         score=100.0,
         deeplink=evidence.deeplink,
         document_version_id=evidence.document_version_id,
+        authority=evidence.authority,
     )
 
 

@@ -1,4 +1,8 @@
+# Secrets. The wildcard matters more than the first line: `.env.bak`, `.env.local` and
+# `.env.old` are what a rushed copy actually produces, and each one carries live API keys.
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.py[cod]
@@ -25,6 +29,12 @@ Thumbs.db
 src/euaia/chat/.files/
 src/euaia/chat/.chainlit/translations/*
 !src/euaia/chat/.chainlit/translations/en-US.json
+
+# Chainlit also writes these into the *current* directory when the chat module is imported
+# from the repository root rather than started properly -- which happens whenever someone
+# pokes at it from a REPL or a script. They are not the app's own config.
+/.chainlit/
+/.files/
 
 # Local logs and scratch output
 *.log
