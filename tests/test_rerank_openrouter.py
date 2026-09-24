@@ -81,6 +81,16 @@ class TestScoring:
         rr.warm()
 
 
+class TestLocalRerankerIsOptional:
+    def test_selecting_it_without_the_extra_says_how_to_install_it(self, monkeypatch):
+        # torch and sentence-transformers are the `local-rerank` extra, absent from the
+        # default image. Choosing "local" without them must fail loudly and name the fix.
+        monkeypatch.setitem(__import__("sys").modules, "sentence_transformers", None)
+        monkeypatch.setattr(rr, "_model", None)
+        with pytest.raises(rr.RerankerUnavailable, match="--extra local-rerank"):
+            rr.load_model("some/model")
+
+
 class TestConfiguredInCodeOnly:
     def test_environment_variables_cannot_change_the_reranker(self, monkeypatch):
         # The reranker decides what every answer is grounded in, so it is chosen in

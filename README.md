@@ -143,18 +143,14 @@ uv run alembic upgrade head
 ```
 
 Then build the corpus, **in this order**. No source documents are stored in the repository;
-both steps fetch them, and both skip anything already on disk, so re-running is free.
+step 1 fetches them and skips anything already on disk, so re-running is free.
 
 ```bash
-# 1. The AI Act, resolved and downloaded from EUR-Lex, then ingested.
-uv run python -m euaia.ingest.pipeline
-
-# 2. The Commission's guidelines, codes of practice and Q&A, downloaded into
-#    data/raw/AI_Act/. Run this AFTER step 1: it also places a copy of the Act
-#    alongside them, and that copy comes from the file step 1 downloaded.
+# 1. Download everything: the AI Act from EUR-Lex, and the Commission's guidelines,
+#    codes of practice and Q&A into data/raw/AI_Act/. No database or API key needed.
 uv run python -m euaia.ingest.ec_documents
 
-# 3. Ingest what step 2 fetched. Step 1 had nothing to ingest for those sources yet.
+# 2. Parse, chunk, embed and activate all thirteen sources in one pass.
 uv run python -m euaia.ingest.pipeline
 ```
 
@@ -194,23 +190,23 @@ docker compose up -d --build
 ```
 
 Then open the chat at <http://127.0.0.1:8001>, or the admin dashboard at
-<http://127.0.0.1:8000/status>. With the local reranker selected, the chat downloads its
-weights (~2.3 GB) on first start before it begins serving; follow it with
-`docker compose logs -f chat`. Later starts reuse them from a volume.
+<http://127.0.0.1:8000/status>. The image is built for the hosted reranker, the default, so
+it contains no torch and no model weights. To use the local reranker instead, see
+[Reranker model](#reranker-model): the image must then be built with `LOCAL_RERANK=true`, and
+the chat downloads the weights (~2.3 GB) on first start before it begins serving; follow it
+with `docker compose logs -f chat`. Later starts reuse them from a volume.
 
 Build the corpus once, **in this order** (and repeat whenever you want to pick up a new
 consolidated version). Nothing is stored in the repository; each step fetches what it needs
 and skips whatever is already in the `euaia-raw` volume.
 
 ```bash
-docker compose --profile tools run --rm ingest        # 1. the Act, from EUR-Lex
-docker compose --profile tools run --rm fetch-docs    # 2. the Commission's documents
-docker compose --profile tools run --rm ingest        # 3. index what step 2 fetched
+docker compose --profile tools run --rm fetch-docs    # 1. download everything
+docker compose --profile tools run --rm ingest        # 2. index it
 ```
 
-Step 2 comes second because it also files a copy of the Act beside the Commission material,
-taken from what step 1 downloaded. Step 3 is what indexes them, since step 1 had nothing to
-index for those sources yet.
+Step 1 downloads the Act from EUR-Lex and the Commission's documents, and needs no database
+or API key. Step 2 finds all of them on disk and indexes the thirteen sources in one pass.
 
 Add `--skip-embeddings` to either `ingest` call to parse and store structure with no API key,
 or `--resume 5` to wait out the embedding quota instead of failing:
@@ -239,9 +235,9 @@ Notes:
   Keep `DATABASE_URL` for running tools on the host.
 - **`.env` never enters the image** — it is excluded by `.dockerignore` and supplied at run
   time.
-- **The image uses CPU-only PyTorch.** On Linux, PyPI's torch pulls the full CUDA stack;
-  `pyproject.toml` routes it to the CPU wheel index instead, keeping several GB of unused GPU
-  libraries out of the image.
+- **PyTorch is only in the image with `LOCAL_RERANK=true`, and then CPU-only.** On Linux,
+  PyPI's torch pulls the full CUDA stack; `pyproject.toml` routes it to the CPU wheel index
+  instead, keeping several GB of unused GPU libraries out of the image.
 - Everything is published on `127.0.0.1` only. Nothing is reachable from other machines.
 
 ## Chat sign-in
@@ -286,7 +282,20 @@ After changing it, restart the chat (`python -m euaia.chat`), or with Docker reb
 since `config.py` is part of it: `docker compose up -d --build chat app`.
 
 The default is the hosted model, described under
-[Hosted reranking](#hosted-reranking-openrouter) below. The local model's weights are **not in this repository** — they download from the
+[Hosted reranking](#hosted-reranking-openrouter) below, and it needs nothing installed
+locally. The local model needs torch and `sentence-transformers`, which are an optional extra
+so that nobody on the default pays for them:
+
+```bash
+uv sync --extra dev --extra local-rerank     # running on the host
+LOCAL_RERANK=true                            # with Docker: add to .env, then
+docker compose up -d --build chat app        # rebuild
+```
+
+Selecting `"local"` without them fails on the first question with a message saying exactly
+this, rather than falling back to another ranking.
+
+The local model's weights are **not in this repository** — they download from the
 Hugging Face Hub the first time they are needed and are then cached on disk. Nothing here
 needs a Hugging Face account or token; the default model is public and Apache-2.0.
 

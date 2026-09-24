@@ -77,6 +77,17 @@ class TestManifest:
         """It comes from the CELLAR cache the pipeline already maintains."""
         assert ec.AI_ACT.pdf_url is None
 
+    def test_the_act_is_fetched_first_so_no_prior_ingest_is_needed(self, tmp_path, monkeypatch):
+        """One download step, then one ingest: the copy must not depend on an earlier ingest."""
+        monkeypatch.setattr(ec.settings, "raw_data_dir", tmp_path)
+
+        def fake_fetch():
+            (tmp_path / "02024R1689-20260727.ENG.pdf").write_bytes(b"%PDF-1.7 act")
+
+        monkeypatch.setattr(ec, "_fetch_eurlex_sources", fake_fetch)
+        copied = ec._copy_ai_act(tmp_path / "AI_Act" / ec.AI_ACT.filename)
+        assert copied is not None and copied["url"] == "cache:02024R1689-20260727.ENG.pdf"
+
 
 class TestFetchPrefersPdf:
     def test_pdf_is_used_when_it_works(self):

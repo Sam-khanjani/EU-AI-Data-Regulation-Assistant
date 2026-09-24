@@ -16,9 +16,11 @@ for the Q&A pages, which are HTML articles -- but every one exposes a Drupal nod
 fallback for when that endpoint is missing or breaks, and the fetch records which route it
 actually took.
 
-Nothing here is wired into the ingestion pipeline yet. Fetching is the whole job:
+This is the corpus' one download step: it also fetches the Act's own PDFs from EUR-Lex into
+the pipeline's cache. Run it first, then ingest once:
 
     uv run python -m euaia.ingest.ec_documents
+    uv run python -m euaia.ingest.pipeline
 
 What these documents are, before anyone indexes them
 ----------------------------------------------------
@@ -162,11 +164,11 @@ AI_ACT = ECDocument(
     filename="01_EU_AI_Act.pdf",
     folder="",
     title="Regulation (EU) 2024/1689 (Artificial Intelligence Act), consolidated",
-    pdf_url=None,  # not fetched here; see _copy_ai_act
+    pdf_url=None,  # fetched through CELLAR, not the newsroom; see _copy_ai_act
     landing_url="https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:32024R1689",
     doc_date="2026-07-27",
     authority="law",
-    notes="Already ingested. Copied from the CELLAR cache rather than re-downloaded.",
+    notes="Fetched from EUR-Lex into the pipeline's cache, then copied here.",
 )
 
 GUIDELINES = (
@@ -345,15 +347,34 @@ def fetch(doc: ECDocument, client: httpx.Client) -> tuple[bytes, str, str]:
     raise FetchError(f"{doc.filename}: no usable source (tried {doc.pdf_url or 'nothing'})")
 
 
+def _fetch_eurlex_sources() -> None:
+    """Download the Act's EUR-Lex PDFs into the pipeline's cache, if not already there.
+
+    This makes this module the one download step for the whole corpus, so ingestion runs once,
+    after it, with everything already on disk. The files go exactly where the pipeline's own
+    fetch would put them (by CELEX under ``raw_data_dir``), so ingestion finds them cached and
+    downloads nothing. Needs no database.
+    """
+    # Imported here: `sources` imports this module, so a top-level import would be circular.
+    from euaia.ingest import pipeline, sources
+    from euaia.ingest.cellar import CellarClient
+
+    with CellarClient() as client:
+        for spec in sources.ALL_SOURCES:
+            if not spec.local_file:
+                pipeline.fetch_pdf_content(client, pipeline.resolve_target(client, spec))
+
+
 def _copy_ai_act(destination: Path) -> dict[str, object] | None:
-    """Place the Act beside the Commission material without fetching it again.
+    """Place the Act beside the Commission material, from the pipeline's cache.
 
     The pipeline caches it under ``raw_data_dir`` by CELEX, and addresses it by that name, so
     the cache is left exactly where it is and this is a copy rather than a move.
     """
+    _fetch_eurlex_sources()
     candidates = sorted(settings.raw_data_dir.glob("02024R1689-*.ENG.pdf"), reverse=True)
     if not candidates:
-        log.warning("%s: no consolidated act in %s; run the ingest pipeline first",
+        log.warning("%s: no consolidated act in %s after fetching from EUR-Lex",
                     AI_ACT.filename, settings.raw_data_dir)
         return None
 

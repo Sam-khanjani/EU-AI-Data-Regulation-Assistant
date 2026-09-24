@@ -89,9 +89,12 @@ def load_model(name: str | None = None):
         try:
             import torch
             from sentence_transformers import CrossEncoder
-        except ImportError as exc:  # pragma: no cover - dependency is declared
+        except ImportError as exc:
+            # An optional extra: the hosted reranker is the default and needs none of it.
             raise RerankerUnavailable(
-                "sentence-transformers is not installed; run `uv sync`"
+                "rerank_provider is local but the local reranker is not installed: run "
+                "`uv sync --extra local-rerank`, or with Docker set LOCAL_RERANK=true in .env "
+                "and rebuild"
             ) from exc
 
         started = time.perf_counter()

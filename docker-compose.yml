@@ -12,7 +12,13 @@ x-app-env: &app-env
   DATABASE_URL: postgresql+psycopg://euaia:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/euaia
 
 x-app: &app
-  build: .
+  build:
+    context: .
+    args:
+      # Leave false for the hosted reranker (the default in config.py). Set LOCAL_RERANK=true
+      # in .env and rebuild when switching rerank_provider to "local": torch and the
+      # cross-encoder are only installed then.
+      LOCAL_RERANK: ${LOCAL_RERANK:-false}
   image: euaia-app
   env_file: .env
   environment:
@@ -78,7 +84,7 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
-      # The first start downloads the reranker weights before serving; allow for it.
+      # With the local reranker, the first start downloads its weights before serving.
       start_period: 15m
 
   # The admin dashboard (/status), plus /api/ask for the evaluation harness, on 8000.
@@ -105,10 +111,10 @@ services:
       start_period: 30s
 
   # On demand only (`--profile tools`): a one-shot job, not a service that should stay up.
-  # Downloads the Commission's guidelines, codes of practice and Q&A into the shared raw
-  # volume. Separate from `ingest` because it needs no database and spends no embedding
-  # quota -- and because it has to run *between* two ingests: it copies the Act from what
-  # the first one downloaded, and the second one indexes what it fetched.
+  # Downloads the whole corpus into the shared raw volume -- the Act from EUR-Lex and the
+  # Commission's guidelines, codes of practice and Q&A. Run it before `ingest`, which then
+  # indexes everything in one pass. Separate because it needs no database and spends no
+  # embedding quota.
   fetch-docs:
     <<: *app
     entrypoint: ["python", "-m", "euaia.ingest.ec_documents"]

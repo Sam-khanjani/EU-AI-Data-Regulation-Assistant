@@ -32,11 +32,6 @@ dependencies = [
     # models
     "groq>=0.13",
     "google-genai>=0.3",
-    # local reranking (cross-encoder, runs on CPU, no API quota)
-    "sentence-transformers>=3.3",
-    # Declared directly only so [tool.uv.sources] below can route it: uv applies sources
-    # to direct dependencies, and torch otherwise arrives transitively.
-    "torch>=2.5",
     # graph
     "langgraph>=0.2.50",
     # utilities
@@ -46,6 +41,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Only for rerank_provider = "local". The hosted reranker is the default and needs none of
+# this, and torch is most of the install -- so it is opt-in rather than paid on every build.
+local-rerank = [
+    # cross-encoder, runs on CPU, no API quota
+    "sentence-transformers>=3.3",
+    # Declared directly only so [tool.uv.sources] below can route it: uv applies sources
+    # to direct dependencies, and torch otherwise arrives transitively.
+    "torch>=2.5",
+]
 dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
