@@ -57,10 +57,16 @@ from euaia.verify.citations import Evidence, decide_verdict, verify_answer
 
 log = logging.getLogger(__name__)
 
-OUT_OF_SCOPE_REASON = (
-    "This question is outside the EU AI Act corpus this assistant indexes. "
-    "It answers only from Regulation (EU) 2024/1689."
+HELP_OFFER = (
+    "I can help with questions about the EU AI Act and the Commission's guidelines, codes of "
+    "practice and Q&A on it, such as prohibited practices, high-risk systems or "
+    "transparency duties. What would you like to know?"
 )
+"""Fixed text, never model-written, so no reply can steer the chat off its subject."""
+OUT_OF_SCOPE_REASON = f"That's outside what I can help with. {HELP_OFFER}"
+_MAX_GREETING_CHARS = 200
+"""The model's own words in a greeting reply are one short sentence; anything longer is
+dropped rather than shown, so small talk cannot grow into a general-purpose answer."""
 NO_EVIDENCE_REASON = (
     "The indexed corpus does not contain provisions that address this question closely "
     "enough to answer it."
@@ -127,6 +133,11 @@ def analyse(state: QueryState, client: GroqClient) -> QueryState:
         a.strip() for a in data.get("referenced_articles", []) if a.strip()
     ]
     state.referenced_annexes = [a.strip() for a in data.get("referenced_annexes", []) if a.strip()]
+    if state.intent == "greeting":
+        reply = str(data.get("reply") or "").strip()
+        state.abstain_reason = (
+            f"{reply} {HELP_OFFER}" if 0 < len(reply) <= _MAX_GREETING_CHARS else HELP_OFFER
+        )
 
     log.debug(
         "intent=%s queries=%s articles=%s annexes=%s",
@@ -152,11 +163,13 @@ _NAMES_THE_ACT = re.compile(
 
 
 def _corrected_intent(intent: str, question: str) -> str:
-    """Override an out_of_scope call when the question explicitly names the Act."""
-    if intent == "out_of_scope" and _NAMES_THE_ACT.search(question):
-        log.info(
-            "Overriding out_of_scope: the question names the Act or one of its provisions"
-        )
+    """Override a no-search intent when the question explicitly names the Act.
+
+    Covers ``greeting`` too: "hi! what does Article 5 say?" is a question, and small talk
+    must never be how a real question goes unanswered.
+    """
+    if intent in ("out_of_scope", "greeting") and _NAMES_THE_ACT.search(question):
+        log.info("Overriding %s: the question names the Act or one of its provisions", intent)
         return "lookup"
     return intent
 
@@ -486,10 +499,13 @@ def run_pipeline(
     if history:
         rewrite_followup(state, history[-settings.followup_turns :], client)
     analyse(state, client)
-    if state.intent == "out_of_scope":
-        state.note("abstaining", "question is outside the indexed corpus")
+    if state.intent in ("out_of_scope", "greeting"):
+        # Nothing is searched and nothing is generated: a greeting's reply is the model's
+        # one short sentence plus fixed text, set in `analyse`.
+        greeting = state.intent == "greeting"
+        state.note("abstaining", "small talk" if greeting else "outside the indexed corpus")
         state.verdict = "abstained"
-        state.abstain_reason = OUT_OF_SCOPE_REASON
+        state.abstain_reason = state.abstain_reason if greeting else OUT_OF_SCOPE_REASON
         state.latency_ms = int((time.perf_counter() - started) * 1000)
         return state
 

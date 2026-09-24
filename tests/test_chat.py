@@ -114,6 +114,14 @@ class TestAnswerReadsAsProse:
         assert text.startswith("**I can't answer that from the AI Act.** Nothing in the corpus")
         assert "2 of its statements could not be verified" in text
 
+    @pytest.mark.parametrize("intent", ["out_of_scope", "greeting"])
+    def test_small_talk_and_off_topic_get_the_friendly_reply_alone(self, intent):
+        view = AnswerView(
+            question="hello", verdict="abstained", intent=intent,
+            abstain_reason="Hi! What would you like to know?",
+        )
+        assert views.answer_markdown(view) == "Hi! What would you like to know?"
+
     def test_an_applicability_answer_gives_criteria_never_a_verdict(self):
         view = answered(
             intent="applicability",

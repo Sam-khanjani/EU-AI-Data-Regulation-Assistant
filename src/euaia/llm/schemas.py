@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-INTENTS = ("lookup", "applicability", "comparison", "out_of_scope")
+INTENTS = ("lookup", "applicability", "comparison", "out_of_scope", "greeting")
 
 
 def _schema(name: str, schema: dict[str, Any]) -> dict[str, Any]:
@@ -45,6 +45,7 @@ QUERY_ANALYSIS_SCHEMA = _schema(
             "search_queries",
             "referenced_articles",
             "referenced_annexes",
+            "reply",
         ],
         "properties": {
             "intent": {
@@ -54,7 +55,15 @@ QUERY_ANALYSIS_SCHEMA = _schema(
                     "lookup: asks what a provision says. "
                     "applicability: asks whether rules apply to the user's own system. "
                     "comparison: asks how provisions or versions differ. "
-                    "out_of_scope: not answerable from the EU AI Act corpus."
+                    "out_of_scope: not answerable from the EU AI Act corpus. "
+                    "greeting: only social conversation, no question to answer."
+                ),
+            },
+            "reply": {
+                "type": "string",
+                "description": (
+                    "For greeting only: one short, warm sentence answering the social part "
+                    "of the message, in the user's language. Empty for every other intent."
                 ),
             },
             "reasoning": {

@@ -38,6 +38,10 @@ class TestOverrideRescuesAnsweredQuestions:
     def test_naming_the_act_overrides_a_refusal(self, question):
         assert _corrected_intent("out_of_scope", question) == "lookup"
 
+    def test_a_greeting_that_names_the_act_is_a_question(self):
+        # Small talk must never be how a real question goes unanswered.
+        assert _corrected_intent("greeting", "Hi! What does Article 5 say?") == "lookup"
+
 
 class TestGenuineRefusalsSurvive:
     @pytest.mark.parametrize(

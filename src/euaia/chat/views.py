@@ -108,6 +108,8 @@ def _grouped_claims(claims: list[AnswerClaim]) -> list[str]:
 def answer_markdown(view: AnswerView) -> str:
     """The reply, as Markdown."""
     if view.verdict == "abstained":
+        if view.intent in ("out_of_scope", "greeting"):
+            return view.abstain_reason or ""  # already a complete, friendly reply
         parts = [f"**I can't answer that from the AI Act.** {view.abstain_reason or ''}".strip()]
         if view.claims_dropped:
             parts.append(

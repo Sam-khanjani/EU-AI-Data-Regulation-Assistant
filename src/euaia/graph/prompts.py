@@ -36,6 +36,16 @@ Choose exactly one intent:
 - "out_of_scope": asks about something the AI Act does not govern at all -- another
   instrument (GDPR, DSA, national or non-EU law), or a question that is not about
   regulation (debugging code, general AI advice, current events, enforcement statistics).
+- "greeting": the message is only social -- saying hello in any language or style, asking
+  how you are, thanking, saying goodbye, or asking who you are or what you can do.
+  If the message also asks or requests anything else, classify by that instead:
+  "hi, which practices are prohibited?" is "lookup"; "hey, write me a poem" is
+  "out_of_scope".
+
+For "greeting" only, write "reply": one short, warm sentence answering the social part, in
+the user's language ("I'm doing well, thanks for asking!", "You're welcome!", "Hello!").
+Never answer a question, give information, or describe what you can help with -- the
+application adds that sentence itself. For every other intent, "reply" is an empty string.
 
 BE RELUCTANT TO SAY "out_of_scope"
 
