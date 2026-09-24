@@ -28,7 +28,7 @@ from typing import Literal
 
 from euaia.ingest.ec_documents import DOCUMENTS, DOWNLOAD_ROOT, Authority
 
-Parser = Literal["pdf_outline", "pdf_preamble", "pdf_sections"]
+Parser = Literal["pdf_outline", "pdf_preamble", "pdf_sections", "pdf_code"]
 """Declared locally rather than imported from ``euaia.db.models``: this module is pure data
 seeded into the ``source`` table, and should not drag SQLAlchemy in behind it."""
 
@@ -147,8 +147,9 @@ def _commission_spec(doc) -> SourceSpec:
         celex_base=None,
         landing_url=doc.landing_url,
         use_consolidated=False,
-        parser="pdf_sections",
-        unit_types=frozenset({"section"}),
+        # Codes get their own reader: commitments, measures, recitals and glossary terms.
+        parser="pdf_code" if doc.authority == "code" else "pdf_sections",
+        unit_types=frozenset({"section", "recital"}),
         authority=doc.authority,
         local_file=f"{DOWNLOAD_ROOT}/" + str(doc.path).replace("\\", "/"),
         fixed_version_label=doc.version_label,

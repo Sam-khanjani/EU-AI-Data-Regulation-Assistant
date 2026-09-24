@@ -86,6 +86,15 @@ undifferentiated list of claims invites reading the second as the first.
 """
 
 
+CODE_ONLY_NOTE = (
+    "> Everything above comes from a voluntary code of practice. It describes what the "
+    "code's signatories commit to, not what the AI Act itself requires."
+)
+"""Shown by code whenever every claim rests on a code, however the model worded them: the
+answer prompt asks it never to write that a code "requires" anything, and it does not always
+comply. An answer spanning tiers already says this through its headings."""
+
+
 def _grouped_claims(claims: list[AnswerClaim]) -> list[str]:
     """Claims under a heading naming what they stand on, in order of authority.
 
@@ -139,6 +148,9 @@ def answer_markdown(view: AnswerView) -> str:
             parts.append(f"{head}  \n{body}")
     else:
         parts.extend(_grouped_claims(view.claims))
+
+    if view.claims and all(claim.basis == "code" for claim in view.claims):
+        parts.append(CODE_ONLY_NOTE)
 
     if view.follow_up_questions:
         parts.append("**To take this further, you would need to answer:**")

@@ -163,11 +163,14 @@ class StructuralUnit(Base):
     )
 
     unit_type: Mapped[str] = mapped_column(UnitType, nullable=False)
-    # Official numbering exactly as published: "6", "III", "5(b)".
-    unit_number: Mapped[str | None] = mapped_column(String(32))
+    # Official numbering exactly as published: "6", "III", "5(b)", "S1 Measure 1.1".
+    unit_number: Mapped[str | None] = mapped_column(String(128))
     # Machine path for stable addressing: "CH_III/ART_6/PAR_2".
     unit_path: Mapped[str] = mapped_column(String(255), nullable=False)
     heading: Mapped[str | None] = mapped_column(Text)
+    # Where the unit sits and what it is, where numbering cannot say (the codes of practice):
+    # "Commitment 1: Marking ... › Measure 1.1: ... | implements Article 50(2) | optional".
+    context: Mapped[str | None] = mapped_column(Text)
 
     text: Mapped[str] = mapped_column(Text, nullable=False)
     # NFKC-folded copy used for quote verification; see verify/normalize.py.

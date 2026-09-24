@@ -185,7 +185,8 @@ class Settings(BaseSettings):
     # --- Prompt versioning (recorded in query_log for auditability) ---
     # v2: fuller, plain-English answers, and follow-up questions rewritten to stand alone.
     # v3: authority tiers in the answer prompt; a greeting intent in the classifier.
-    prompt_version: str = "v3"
+    # v4: codes of practice -- context lines in evidence, measures named, parts covered.
+    prompt_version: str = "v4"
 
     # --- Chat interface (python -m euaia.chat) ---
     # Who may sign in: comma-separated name:password pairs, e.g. "alice:s3cret,bob:hunter2".

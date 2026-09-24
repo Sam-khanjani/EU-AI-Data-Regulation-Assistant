@@ -49,6 +49,10 @@ class ParsedUnit:
     page: int | None = None
     """1-based page the unit starts on, where the reader could establish it."""
     children: list[ParsedUnit] = field(default_factory=list)
+    context: str | None = None
+    """Where the unit sits and what it is, for documents whose numbering alone cannot say
+    (see :func:`parse_code`). Embedded with the chunk and shown to the answer model; never
+    part of ``text``, so it can never be quoted as source."""
 
 
 @dataclass(slots=True)
@@ -961,3 +965,213 @@ def parse_sections(pdf_bytes: bytes) -> ParsedDocument:
 
     log.info("Parsed PDF: %d sections", len(units))
     return ParsedDocument(units=units)
+
+
+# ------------------------------------------------------------------- codes of practice
+# The codes are read as sections first, then given the structure a reader would cite. Their
+# outline names every part ("Commitment 1", "Measure 1.1", "Sub-measure 1.1.2") but the
+# numbering is in words, so the section reader leaves it unparsed; and three parts hide units
+# inside one block of text: the lettered recitals, the glossary table, and the Act's own text
+# that code 08 quotes at the head of each commitment.
+
+_CODE_PART = re.compile(
+    r"^(Section|Commitment|Measure|Sub-measure|Appendix|Annex)\s+(\d+(?:\.\d+)*)[.:]?\s*(.*)$"
+)
+# "a) " in code 08, "(a) " in the GPAI codes. A title ends in ":" (08) or "." (safety code).
+_RECITAL_ITEM = re.compile(r"^\(?([a-z])\)\s+")
+_RECITAL_TITLE = re.compile(r"^(.{3,100}?)[:.]\s")
+_LEGAL_TEXT = re.compile(r"^LEGAL TEXT\b:?\s*(.*)$")
+_QUOTE_START = re.compile(r"^(\d+\.\s|Article \d)")
+"""What the Act's text looks like when a code reproduces it: "2. Providers ... shall" or
+"Article 3(64) AI Act: ...". The copyright code's "(1) In order to demonstrate ..." is the
+code's own wording and deliberately does not match."""
+_OWN_WORDS = re.compile(
+    r"^(In order to|To fulfil|To effectively|Signatories|ADDITIONAL LEGAL TEXT)"
+)
+_PAGE_NUMBER = re.compile(r"^\d{1,3}$")
+_MAX_NUMBER_CHARS = 120
+
+
+def parse_code(pdf_bytes: bytes) -> ParsedDocument:
+    """Parse a code of practice into the units a reader would cite, each with its context.
+
+    Every unit gets a number ("S1 Measure 1.1" -- sections prefix it only where a code has
+    more than one, as "Commitment 1" then exists twice) and a ``context`` line built from the
+    code itself: its path of headings, the Act provisions its commitment implements (the
+    ``LEGAL TEXT:`` line), and whether a measure is optional.
+    """
+    doc = parse_sections(pdf_bytes)
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        units = _split_code_units(doc.units, pdf)
+    _describe_code_units(units)
+    for ordinal, unit in enumerate(units, start=1):
+        unit.ordinal = ordinal
+    log.info("Parsed code of practice: %d units", len(units))
+    return ParsedDocument(units=units)
+
+
+def _split_code_units(units: list[ParsedUnit], pdf: pdfplumber.PDF) -> list[ParsedUnit]:
+    """Number every unit, and split out recitals, glossary terms and quoted Act text."""
+    out: list[ParsedUnit] = []
+    for position, unit in enumerate(units):
+        lines = [line for line in unit.text.split("\n") if not _PAGE_NUMBER.match(line.strip())]
+        unit.text = "\n".join(lines)
+        if match := _CODE_PART.match(unit.heading or ""):
+            kind, number, title = match.groups()
+            unit.unit_number, unit.heading = f"{kind} {number}", title or None
+        else:  # "Objectives", "Recitals", "Glossary", ...: the name is the number
+            unit.unit_number, unit.heading = (unit.heading or "")[:_MAX_NUMBER_CHARS], None
+
+        if unit.unit_number == "Recitals":
+            children = _split_recitals(unit, lines)
+        elif unit.unit_number == "Glossary":
+            end = units[position + 1].page if position + 1 < len(units) else len(pdf.pages)
+            children = _split_glossary(unit, lines, pdf.pages[(unit.page or 1) - 1 : end])
+        else:
+            children = _split_legal_text(unit, lines)
+        out.append(unit)
+        out.extend(children)
+    return out
+
+
+def _child(parent: ParsedUnit, suffix: str, unit_type: str, number: str,
+           heading: str | None, lines: list[str]) -> ParsedUnit:
+    return ParsedUnit(
+        unit_type=unit_type,
+        unit_path=f"{parent.unit_path}/{suffix}",
+        text="\n".join(lines),
+        ordinal=0,
+        unit_number=number[:_MAX_NUMBER_CHARS],
+        heading=heading,
+        parent_path=parent.unit_path,
+        page=parent.page,
+    )
+
+
+def _split_recitals(unit: ParsedUnit, lines: list[str]) -> list[ParsedUnit]:
+    """One unit per lettered recital, "a) Trust in the information ecosystem: ...".
+
+    Letters must run a, b, c, ... in order, so a lettered list *inside* a recital cannot
+    start a new one.
+    """
+    starts, expected = [], "a"
+    for index, line in enumerate(lines):
+        if (match := _RECITAL_ITEM.match(line)) and match.group(1) == expected:
+            starts.append(index)
+            expected = chr(ord(expected) + 1)
+    if len(starts) < 2:
+        return []
+
+    children = []
+    for n, start in enumerate(starts):
+        body = lines[start : starts[n + 1] if n + 1 < len(starts) else len(lines)]
+        match = _RECITAL_ITEM.match(body[0])
+        letter = match.group(1)
+        # A short opening phrase ended by ":" or "." is the recital's title; a recital that
+        # opens with a full sentence ("The Signatories recognise ...") has none.
+        found = _RECITAL_TITLE.match(" ".join(body)[match.end():])
+        title = found.group(1).strip() if found else None
+        if title and (len(title.split()) > 14 or title.startswith(("The ", "This "))):
+            title = None
+        children.append(_child(unit, f"REC_{letter}", "recital", f"Recital {letter}", title, body))
+    unit.text = "\n".join(lines[: starts[0]])
+    return children
+
+
+def _split_glossary(unit: ParsedUnit, lines: list[str], pages) -> list[ParsedUnit]:
+    """One unit per term, read from the glossary's two-column table.
+
+    A row with two filled cells is a term; a one-cell row continues the previous definition
+    across a page break. Tables with no two-cell row (a figure's label) are not glossary.
+    """
+    terms: list[list[str]] = []
+    for page in pages:
+        for table in page.extract_tables():
+            current = None
+            for row in table:
+                # Cells wrap inside the table: rejoin "model-\nindependent" as one word.
+                cells = [re.sub(r"(\w)- (\w)", r"\1-\2", " ".join(c.split()))
+                         for c in row if c and c.strip()]
+                if len(cells) == 2 and cells != ["Term", "Definition"]:
+                    current = cells
+                    terms.append(current)
+                elif len(cells) == 1 and current:
+                    current[1] += " " + cells[0]
+    header = next((i for i, line in enumerate(lines) if _collapse(line) == "term definition"), None)
+    if len(terms) < 2 or header is None:
+        return []
+
+    unit.text = "\n".join(lines[:header])
+    return [
+        _child(unit, f"TERM_{n}", "section", f"Glossary: {re.sub('[‘’]', '', term)}", None,
+               [term, definition])
+        for n, (term, definition) in enumerate(terms, start=1)
+    ]
+
+
+def _split_legal_text(unit: ParsedUnit, lines: list[str]) -> list[ParsedUnit]:
+    """Move the Act's own text, where a code reproduces it, into a unit labelled as a quote.
+
+    Code 08 opens each commitment with the paragraph of Article 50 it implements, verbatim
+    ("Providers ... shall ensure ..."). Left inside the commitment, that obligation reads as
+    the voluntary code's own words. The quote runs from the ``LEGAL TEXT`` line to where the
+    code speaks for itself again.
+    """
+    at = next((i for i, line in enumerate(lines) if _LEGAL_TEXT.match(line)), None)
+    if at is None:
+        return []
+    end = next((i for i in range(at + 1, len(lines)) if _OWN_WORDS.match(lines[i])), len(lines))
+    quoted = lines[at + 1 : end]
+    if not quoted or not _QUOTE_START.match(quoted[0]):
+        return []
+
+    refs = _LEGAL_TEXT.match(lines[at]).group(1).strip() or "the AI Act"
+    unit.text = "\n".join(lines[: at + 1] + lines[end:])
+    return [_child(unit, "LEGAL", "section", f"{unit.unit_number}, quoted AI Act text",
+                   f"Quoted from {refs}", quoted)]
+
+
+def _describe_code_units(units: list[ParsedUnit]) -> None:
+    """Fill in ``context``, then prefix numbers with their section where a code has two."""
+    by_path = {u.unit_path: u for u in units}
+
+    def chain(unit: ParsedUnit) -> list[ParsedUnit]:
+        path, out = unit.unit_path, []
+        while path in by_path:
+            out.insert(0, by_path[path])
+            path = by_path[path].parent_path
+        return out
+
+    implements = {}
+    for unit in units:
+        for line in unit.text.split("\n"):
+            if (match := _LEGAL_TEXT.match(line)) and match.group(1).strip():
+                implements[unit.unit_path] = match.group(1).strip()
+
+    for unit in units:
+        path = chain(unit)
+        parts = [" › ".join(
+            u.heading if u.unit_path.endswith("/LEGAL")
+            else f"{u.unit_number}: {u.heading}" if u.heading else u.unit_number
+            for u in path
+        )]
+        if refs := next((implements[u.unit_path] for u in reversed(path)
+                         if u.unit_path in implements), None):
+            parts.append(f"implements {refs}")
+        if unit.unit_number.split()[0] in ("Measure", "Sub-measure"):
+            optional = any("(optional)" in (u.heading or "") for u in path)
+            parts.append(
+                "optional measure" if optional else "mandatory for signatories of the code"
+            )
+        if unit.unit_type == "recital":
+            parts.append("recital: context for the commitments, not a commitment itself")
+        if unit.unit_path.endswith("/LEGAL"):
+            parts.append("AI Act text reproduced in the code, not the code's own words")
+        unit.context = " | ".join(parts)
+
+    sections = [u for u in units if u.unit_number.startswith("Section ") and not u.parent_path]
+    if len(sections) > 1:
+        for unit in units:
+            top = chain(unit)[0]
+            if top is not unit and top.unit_number.startswith("Section "):
+                unit.unit_number = f"S{top.unit_number.split()[1]} {unit.unit_number}"

@@ -51,6 +51,7 @@ from euaia.retrieval.hybrid import (
     fit_token_budget,
     label_units,
     retrieve,
+    with_structure,
 )
 from euaia.retrieval.rerank import rerank
 from euaia.verify.citations import Evidence, decide_verdict, verify_answer
@@ -218,6 +219,11 @@ def rerank_evidence(state: QueryState, session: Session) -> QueryState:
     # promoted into the evidence and then dropped for want of room -- leaving an answer about
     # legal obligations resting entirely on guidance and a voluntary code.
     units = fit_token_budget(by_authority(units), settings.evidence_token_budget)
+    # Code units are read inside their commitment, as paragraphs are read inside articles:
+    # in full with what is left of the same budget, the rest as an outline of headings, so
+    # every part is at least named. The prompt budget below has the last word.
+    spent = sum(estimate_tokens(u.text) for u in units)
+    units = with_structure(session, units, max(0, settings.evidence_token_budget - spent))
     state.retrieved = units
     state.evidence = _fit_to_prompt_budget(label_units(units), state)
     return state

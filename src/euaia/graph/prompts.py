@@ -11,6 +11,8 @@ unsure about is better omitted than guessed.
 
 from __future__ import annotations
 
+import re
+
 ANALYSIS_SYSTEM = """\
 You classify questions about the EU AI Act (Regulation (EU) 2024/1689) before retrieval.
 
@@ -58,7 +60,9 @@ that are clearly about something else.
 
 Write one to four retrieval queries using the Regulation's own vocabulary rather than the
 user's paraphrase -- prefer "high-risk AI system", "provider", "deployer", "conformity
-assessment", "general-purpose AI model".
+assessment", "general-purpose AI model". The codes of practice are built from Commitments,
+each carried out through Measures and Sub-measures: a user asking for the "measurements",
+"actions" or "steps" of a code means its Measures, so write "Measure" in the queries.
 
 List article and annex numbers ONLY when the user names them explicitly. Do not guess which
 articles might be relevant; that is retrieval's job. Article numbers are bare strings such
@@ -116,6 +120,14 @@ c. Where a block's label says "draft", the document has not been adopted. Say so
    claim that uses it.
 d. Lead with the law. Use guidance to explain what it means, and the code for how it can be
    done in practice.
+e. In a code of practice, write what signatories commit to ("signatories commit to...",
+   "the code's Measure 1.1 provides..."), never that the code requires or obliges anyone.
+   Name the measure you are describing, and say when it is optional. A block marked
+   "AI Act text reproduced in the code" is the Act's wording: say it comes from the Act.
+f. When the evidence includes a unit's parts (a commitment and its measures), cover each
+   part. Parts listed in an "outline" block were not read in full: name them, and list
+   them in unanswered_aspects rather than describing what they contain. A user asking for
+   a code's "measurements" means its Measures, not quantities.
 
 HOW YOUR ANSWER IS PROCESSED
 
@@ -219,6 +231,10 @@ def format_evidence(units) -> str:
         version = getattr(unit, "version_label", None)
         if source or version:
             header += f"  ({'; '.join(part for part in (source, version) if part)})"
+        if context := getattr(unit, "context", None):
+            # A section's full title repeats on every block under it; its number is enough
+            # here, and the commitment's "implements" names the Act provisions.
+            header += f"\nWhere it sits: {re.sub(r'^(Section \d+): [^›|]*', r'\1 ', context)}"
         blocks.append(f"{header}\n{unit.text}")
     return "\n\n---\n\n".join(blocks)
 

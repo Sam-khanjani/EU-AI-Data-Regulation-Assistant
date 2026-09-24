@@ -191,6 +191,7 @@ _PARSERS: dict[str, Callable[[bytes], ParsedDocument]] = {
     "pdf_outline": pdf.parse_consolidated,
     "pdf_preamble": pdf.parse_recitals,
     "pdf_sections": pdf.parse_sections,
+    "pdf_code": pdf.parse_code,
 }
 
 
@@ -503,6 +504,7 @@ def _write_units(
                 unit_number=unit.unit_number,
                 unit_path=unit.unit_path,
                 heading=unit.heading,
+                context=unit.context,
                 text=unit.text,
                 text_normalized=normalize_text(unit.text),
                 ordinal=unit.ordinal,

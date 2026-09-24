@@ -27,6 +27,7 @@ whole articles because a paragraph read alone is often meaningless.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field, replace
 
 from sqlalchemy import text
@@ -99,6 +100,8 @@ class RetrievedUnit:
     matched_chunk_ids: list[int] = field(default_factory=list)
     label: str = ""
     """The handle the answer model cites (E1, E2, ...), assigned by :func:`label_units`."""
+    context: str | None = None
+    """Where the unit sits and what it is (codes of practice); shown in the evidence header."""
 
 
 # What every retrieval leg starts from: chunks of active document versions, with their unit,
@@ -171,15 +174,32 @@ def fulltext_search(
     return [_candidate(row) for row in rows]
 
 
+_CODE_PART = re.compile(r"\b(commitment|sub-measure|measure|appendix)\s+(\d+(?:\.\d+)*)", re.I)
+
+
+def code_parts(question: str) -> list[str]:
+    """Parts of a code of practice the question names: ``['Commitment 1', 'Measure 1.2']``.
+
+    Read from the question itself rather than asked of the analyser: the names are fixed
+    words followed by a number, so a pattern is exact where a model would only be likely.
+    """
+    return [f"{kind.capitalize()} {number}" for kind, number in _CODE_PART.findall(question)]
+
+
 def structural_search(
     session: Session,
     articles: list[str],
     annexes: list[str],
     limit: int = 40,
     source_keys: list[str] | None = None,
+    parts: list[str] | None = None,
 ) -> list[Candidate]:
-    """Fetch provisions the user named outright, bypassing ranking entirely."""
-    if not articles and not annexes:
+    """Fetch provisions the user named outright, bypassing ranking entirely.
+
+    ``parts`` are code-of-practice parts ("Measure 1.2"). Every code has a Commitment 1, so
+    this finds them all and leaves choosing between them to reranking.
+    """
+    if not articles and not annexes and not parts:
         return []
 
     sql = text(
@@ -190,6 +210,8 @@ def structural_search(
              OR (su.unit_type = 'annex'   AND su.unit_number = ANY(:annexes))
              OR (su.unit_type = 'paragraph' AND split_part(
                     split_part(su.unit_path, 'ART_', 2), '/', 1) = ANY(:articles))
+             -- "S1 Measure 1.2" ends with the part named; "Sub-measure 1.2.1" does not match.
+             OR (s.authority = 'code' AND su.unit_number ~* ANY(:parts))
           )"""
         + _SOURCE_FILTER
         + """
@@ -202,6 +224,7 @@ def structural_search(
         {
             "articles": [a.strip() for a in articles],
             "annexes": [a.strip().upper() for a in annexes],
+            "parts": [f"(^| ){re.escape(p)}$" for p in parts or []],
             "limit": limit,
             "source_keys": source_keys,
         },
@@ -312,7 +335,7 @@ def _hydrate_units(session: Session, units: list[RetrievedUnit]) -> None:
     rows = session.execute(
         text(
             """
-            SELECT id, unit_path, unit_type, unit_number, heading, text, eurlex_deeplink
+            SELECT id, unit_path, unit_type, unit_number, heading, text, eurlex_deeplink, context
             FROM structural_unit WHERE id = ANY(:ids)
             """
         ),
@@ -330,6 +353,7 @@ def _hydrate_units(session: Session, units: list[RetrievedUnit]) -> None:
         unit.heading = row["heading"]
         unit.text = row["text"]
         unit.deeplink = row["eurlex_deeplink"]
+        unit.context = row["context"]
         # source_key comes from the unit, not the row: it is already known from the candidate,
         # and this query reads structural_unit alone.
         unit.citation_label = citation_label(
@@ -377,6 +401,93 @@ def fit_token_budget(
 
     log.debug("evidence budget: kept %d/%d units, ~%d tokens", len(kept), len(units), spent)
     return kept
+
+
+def with_structure(
+    session: Session, units: list[RetrievedUnit], budget: int, estimator=None
+) -> list[RetrievedUnit]:
+    """Read each piece of a code of practice inside its commitment, as articles are read.
+
+    A matched paragraph of the Act is read as its whole article. The codes' equivalent is the
+    commitment: a matched measure or sub-measure brings the commitment it belongs to, and a
+    commitment brings its measures. Without that, "what are the measures of commitment ...?"
+    is answered from whichever measures happened to score best -- some from one commitment,
+    some from another, and never the list of what each commitment contains.
+
+    So each code unit in the evidence is anchored on its commitment (or on itself, outside
+    any commitment: a recital, a glossary term, an appendix), and the anchor and everything
+    under it follow in document order: in full while ``budget`` lasts, the rest as one
+    outline block of their heading lines, verbatim -- enough for the answer to name every
+    part and say which it has not read. What was matched stays first, as ranked; the
+    structure goes after it, so a prompt trimmed for size loses the structure first.
+
+    Codes of practice only, for now: an article's text already contains its paragraphs.
+    """
+    estimate = estimator or estimate_tokens
+    have = {u.unit_id for u in units}
+    anchors: set[tuple[int, str]] = set()
+    added: list[RetrievedUnit] = []
+    spent = 0
+    for unit in [u for u in units if u.authority == "code"]:
+        anchor = session.execute(
+            text(
+                """
+                SELECT unit_path FROM structural_unit
+                WHERE document_version_id = :version AND :path LIKE unit_path || '/%'
+                  AND unit_number ~ '(^| )Commitment [0-9]+$'
+                """
+            ),
+            {"version": unit.document_version_id, "path": unit.unit_path},
+        ).scalar() or unit.unit_path
+        if (unit.document_version_id, anchor) in anchors:
+            continue
+        anchors.add((unit.document_version_id, anchor))
+
+        rows = session.execute(
+            text(
+                """
+                SELECT id, unit_path, unit_type, unit_number, heading, text, eurlex_deeplink,
+                       context
+                FROM structural_unit
+                WHERE document_version_id = :version
+                  AND (unit_path = :anchor OR unit_path LIKE :anchor || '/%')
+                ORDER BY ordinal
+                """
+            ),
+            {"version": unit.document_version_id, "anchor": anchor},
+        ).mappings().all()
+
+        unread = []
+        for row in rows:
+            if row["id"] in have:
+                continue
+            have.add(row["id"])
+            if spent + estimate(row["text"]) <= budget:
+                spent += estimate(row["text"])
+                added.append(_from_row(unit, row, row["text"], row["context"]))
+            else:
+                unread.append(row)
+        if unread:
+            outline = "\n".join(row["text"].split("\n", 1)[0] for row in unread)
+            spent += estimate(outline)
+            top = _from_row(unit, rows[0], outline,
+                            f"{rows[0]['context']} | outline: headings of parts not read in full")
+            added.append(replace(top, citation_label=f"{top.citation_label} (outline)"))
+    if added:
+        log.info("Added %d structure units around the evidence (~%d tokens)", len(added), spent)
+    return units + added
+
+
+def _from_row(base: RetrievedUnit, row, body: str, context: str | None) -> RetrievedUnit:
+    """A unit of the same document as ``base``, read from a ``structural_unit`` row."""
+    return replace(
+        base, unit_id=row["id"], unit_path=row["unit_path"], unit_type=row["unit_type"],
+        unit_number=row["unit_number"], heading=row["heading"], text=body,
+        deeplink=row["eurlex_deeplink"], context=context, matched_chunk_ids=[],
+        citation_label=citation_label(
+            row["unit_type"], row["unit_number"], row["unit_path"], base.source_key
+        ),
+    )
 
 
 AUTHORITY_ORDER: tuple[str, ...] = ("law", "guidance", "code")
@@ -449,6 +560,7 @@ def retrieve(
     annexes: list[str] | None = None,
     candidates: int | None = None,
     source_keys: list[str] | None = None,
+    parts: list[str] | None = None,
 ) -> list[Candidate]:
     """Run all three legs and fuse them, returning **chunk-level** candidates.
 
@@ -473,7 +585,8 @@ def retrieve(
             legs[f"fulltext_{i}"] = fulltext_search(session, extra, limit, source_keys)
 
     structural = structural_search(
-        session, articles or [], annexes or [], source_keys=source_keys
+        session, articles or [], annexes or [], source_keys=source_keys,
+        parts=parts if parts is not None else code_parts(query),
     )
     if structural:
         legs["structural"] = structural

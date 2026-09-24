@@ -49,6 +49,11 @@ _EMBEDDABLE = frozenset({"paragraph", "article", "recital", "annex", "section"})
 # Tokens reserved between the breadcrumb and the body.
 _SEPARATOR_TOKENS = 8
 
+# Below this, a unit with children is only a heading over them, and embedding it adds a
+# near-empty vector that matches any question sharing its title words. Its children carry
+# its heading in their own breadcrumbs, and it is still stored as their parent.
+_CONTAINER_TOKENS = 60
+
 
 @dataclass(frozen=True, slots=True)
 class ChunkDraft:
@@ -88,7 +93,13 @@ def build_breadcrumb(doc_title: str, unit: ParsedUnit, by_path: dict[str, Parsed
 
     ``Regulation (EU) 2024/1689 - Chapter III, Section 1, Article 6 - Classification rules
     for high-risk AI systems``
+
+    A unit whose reader supplied a ``context`` (the codes of practice) uses that instead:
+    their structure is named in words -- Commitment, Measure -- that the numbering-based
+    trail below cannot express.
     """
+    if unit.context:
+        return f"{doc_title} - {unit.context}"
     trail: list[str] = []
     for ancestor in _ancestors(unit, by_path):
         label = _unit_label(ancestor)
@@ -183,6 +194,7 @@ def chunk_document(
     for unit in doc.units:
         if unit.unit_type == "paragraph" and unit.parent_path:
             paragraphs.setdefault(unit.parent_path, []).append(unit)
+    parents = {u.parent_path for u in doc.units if u.parent_path}
 
     drafts: list[ChunkDraft] = []
     for unit in doc.units:
@@ -196,6 +208,10 @@ def chunk_document(
 
         if children and "paragraph" in allowed:
             bodies = _pack([p.text for p in children], breadcrumb)
+        elif not children and unit.unit_path in parents and (
+            count_tokens(unit.text) < _CONTAINER_TOKENS
+        ):
+            continue  # a heading over its children ("Section 1", "Recitals: Whereas:")
         else:
             bodies = _split_body(unit.text, breadcrumb)
 
