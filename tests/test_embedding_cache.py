@@ -68,6 +68,14 @@ class FakeEmbedder:
 
 
 @pytest.fixture(autouse=True)
+def no_real_waits(monkeypatch):
+    """Quota rejections now pause before giving up; record the pauses instead of sleeping."""
+    pauses: list[float] = []
+    monkeypatch.setattr(embeddings.time, "sleep", pauses.append)
+    return pauses
+
+
+@pytest.fixture(autouse=True)
 def clean_cache():
     """Remove only the fixture's own entries, leaving a real corpus cache intact."""
 
@@ -169,8 +177,41 @@ class TestResumability:
 
     def test_quota_error_is_reported_not_raised_raw(self):
         fake = FakeEmbedder(fail_after=0)
-        with pytest.raises(QuotaExhausted, match="quota exhausted"):
+        with pytest.raises(QuotaExhausted, match="daily embedding quota is used up"):
             embed_with_cache(texts(20), fake)
+
+
+class TestPerMinuteWindow:
+    """A 429 without a retry hint is usually the per-minute window, not the daily quota."""
+
+    def test_an_unhinted_rejection_is_waited_out_and_the_run_completes(self, no_real_waits):
+        fake = FakeEmbedder(fail_after=16)
+        original = fake.embed_documents
+
+        def recovers_after_one_window(batch, batch_size=16):
+            if no_real_waits:  # the window has passed once we have paused
+                fake.fail_after = None
+            return original(batch, batch_size)
+
+        fake.embed_documents = recovers_after_one_window
+        vectors, stats = embed_with_cache(texts(40), fake)
+        assert len(vectors) == 40 and stats.computed == 40
+        assert no_real_waits == [embeddings.UNHINTED_QUOTA_WAIT_SECONDS + 1]
+
+    def test_waiting_that_brings_no_progress_gives_up(self, no_real_waits):
+        """The daily quota really is spent: stop after a bounded number of pauses."""
+        with pytest.raises(QuotaExhausted):
+            embed_with_cache(texts(20), FakeEmbedder(fail_after=0))
+        assert len(no_real_waits) == embeddings.MAX_STALLED_WAITS
+
+    def test_a_long_hinted_delay_is_not_waited_out(self, no_real_waits):
+        fake = FakeEmbedder(fail_after=0)
+        fake.embed_documents = lambda *_a, **_k: (_ for _ in ()).throw(
+            RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 7200s.")
+        )
+        with pytest.raises(QuotaExhausted):
+            embed_with_cache(texts(5), fake)
+        assert no_real_waits == []
 
 
 class TestSpendCap:

@@ -60,12 +60,26 @@ class IngestResult:
     units: int = 0
     chunks: int = 0
     detail: str = ""
+    embedded: int = 0
+    """New vectors computed this run -- what it cost in embedding quota."""
+    reused: int = 0
+    """Vectors taken from the cache, which cost nothing."""
+
+    @property
+    def live(self) -> bool:
+        """Searchable after this run."""
+        return self.status in ("ingested", "up-to-date")
 
     def __str__(self) -> str:
-        head = f"{self.source_key}: {self.status} [{self.version_label}]"
+        head = f"{'OK  ' if self.live else 'FAIL'} {self.source_key} ({self.version_label})"
         if self.status == "ingested":
-            return f"{head} - {self.units} units, {self.chunks} chunks"
-        return f"{head} - {self.detail}" if self.detail else head
+            return (
+                f"{head}\n     indexed: {self.units} parts parsed, {self.chunks} chunks "
+                f"searchable ({self.embedded} newly embedded, {self.reused} reused from cache)"
+            )
+        if self.status == "up-to-date":
+            return f"{head}\n     unchanged since the last run, skipped ({self.chunks} chunks)"
+        return f"{head}\n     not finished: {self.detail}" if self.detail else head
 
 
 def ensure_source(session: Session, spec: SourceSpec) -> Source:
@@ -290,6 +304,7 @@ def _ingest_source_locked(
                     status="up-to-date",
                     version_label=existing.version_label,
                     celex=ref.celex,
+                    chunks=stored_chunks or 0,
                     detail="content hash unchanged",
                 )
             log.info(
@@ -301,7 +316,7 @@ def _ingest_source_locked(
         session.add(IngestionRun(document_version_id=version.id, status="running"))
 
     try:
-        units, chunks = _ingest_content(
+        units, chunks, embed_stats = _ingest_content(
             spec, ref, manifestation,
             skip_embeddings=skip_embeddings, max_embeddings=max_embeddings,
         )
@@ -332,6 +347,8 @@ def _ingest_source_locked(
         celex=ref.celex,
         units=units,
         chunks=chunks,
+        embedded=embed_stats.computed,
+        reused=embed_stats.reused,
     )
 
 
@@ -378,8 +395,8 @@ def _ingest_content(
     *,
     skip_embeddings: bool,
     max_embeddings: int | None = None,
-) -> tuple[int, int]:
-    """Parse, persist units, chunk and embed. Returns (unit count, chunk count)."""
+) -> tuple[int, int, embeddings.EmbedStats]:
+    """Parse, persist units, chunk and embed. Returns unit count, chunk count, and cost."""
     doc = parse_content(spec, manifestation)
     drafts = chunk_document(doc, spec.doc_title or spec.title, spec.unit_types)
 
@@ -389,7 +406,7 @@ def _ingest_content(
 
         if skip_embeddings:
             log.warning("skip-embeddings: %d chunks left unembedded", len(drafts))
-            return len(path_to_id), 0
+            return len(path_to_id), 0, embeddings.EmbedStats()
 
         embedder = Embedder()
         # Goes through the cache rather than the embedder directly: the free tier allows
@@ -418,7 +435,7 @@ def _ingest_content(
             )
             written += 1
         session.flush()
-        return len(path_to_id), written
+        return len(path_to_id), written, embed_stats
 
 
 def _selected_units(doc: ParsedDocument, unit_types: frozenset[str] | None) -> list:
@@ -742,6 +759,9 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)-7s %(name)s: %(message)s",
     )
+    if not args.verbose:
+        # One line per HTTP request buries the results; rate-limit pauses are logged anyway.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
 
     if args.list:
         for spec in sources.ALL_SOURCES:
@@ -777,7 +797,7 @@ def _run(args: argparse.Namespace) -> int:
                     print(f"{'':24s} {result.detail}")
         return 0
 
-    failures = 0
+    results: list[IngestResult] = []
     for key in args.source or [s.key for s in sources.ALL_SOURCES]:
         spec = sources.get(key)
         try:
@@ -789,14 +809,44 @@ def _run(args: argparse.Namespace) -> int:
                 attempts=args.resume,
                 wait=args.resume_wait,
             )
-            print(result)
-            if result.status == "quota-exhausted":
-                failures += 1
         except Exception as exc:  # noqa: BLE001
-            failures += 1
             log.exception("Ingestion failed for %s", key)
-            print(f"{key}: FAILED - {exc}", file=sys.stderr)
-    return 1 if failures else 0
+            result = IngestResult(key, "failed", spec.fixed_version_label or "?", detail=str(exc))
+        print(result, flush=True)
+        results.append(result)
+
+    print(_summary(results))
+    return 0 if all(r.live for r in results) else 1
+
+
+def _summary(results: list[IngestResult]) -> str:
+    """The end-of-run report: what is searchable now, what it cost, and what to do next."""
+    live = [r for r in results if r.live]
+    lines = [
+        "",
+        "=" * 64,
+        f"Sources live:      {len(live)} of {len(results)}",
+        f"Chunks searchable: {sum(r.chunks for r in live)}",
+        f"Embeddings:        {sum(r.embedded for r in results)} new this run (Gemini quota), "
+        f"{sum(r.reused for r in results)} reused from cache (free)",
+    ]
+    unfinished = [r for r in results if not r.live]
+    if not unfinished:
+        lines.append("Everything is indexed. Restart the chat to use it: "
+                     "docker compose up -d chat app")
+    else:
+        lines.append(f"Not finished:      {', '.join(r.source_key for r in unfinished)}")
+        if any(r.status == "quota-exhausted" for r in unfinished):
+            lines.append(
+                "Next step: put another GOOGLE_API_KEY in .env (or wait until tomorrow), then "
+                "run the same command again. Finished sources are skipped and saved "
+                "embeddings are reused."
+            )
+        else:
+            lines.append("Next step: see the errors above, fix them, "
+                         "and run the same command again.")
+    lines.append("=" * 64)
+    return "\n".join(lines)
 
 
 def _ingest_with_resume(

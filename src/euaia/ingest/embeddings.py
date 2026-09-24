@@ -193,6 +193,15 @@ class Embedder:
 # it out inside a command would hang for hours.
 MAX_QUOTA_WAIT_SECONDS = 180.0
 
+# A rejection with no retry hint is still usually the per-minute window, not the daily one:
+# measured on 2026-09-24, a run gave up on eight sources in a second each while the key still
+# had most of the day's allowance. So wait one window before believing the quota is spent.
+UNHINTED_QUOTA_WAIT_SECONDS = 60.0
+
+# Consecutive pauses that produce no progress before the quota is taken to be the daily one.
+# Any successful batch resets the count, so a long run can wait out many short windows.
+MAX_STALLED_WAITS = 2
+
 
 def text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -226,10 +235,9 @@ class EmbedStats:
     def __str__(self) -> str:
         if not self.total:
             return "nothing to embed"
-        saved = f"{self.reused / self.total:.0%}"
         return (
-            f"{self.computed} embedded, {self.reused} reused from cache ({saved} of the "
-            f"daily quota saved)"
+            f"{self.computed} newly embedded (uses Gemini quota), "
+            f"{self.reused} reused from cache (free)"
         )
 
 
@@ -362,9 +370,10 @@ def embed_with_cache(
 
     if todo:
         log.info(
-            "Embedding %d new chunks (%d reused from cache)", len(todo), stats.reused
+            "Embedding %d new chunks (%d reused from cache)...", len(todo), stats.reused
         )
     waits_used = 0
+    stalled = 0
     start = 0
     while start < len(todo):
         batch = todo[start : start + batch_size]
@@ -375,27 +384,31 @@ def embed_with_cache(
             if not is_quota_error(exc):
                 raise
 
-            delay = _retry_delay(exc)
+            hinted = _retry_delay(exc)
+            delay = UNHINTED_QUOTA_WAIT_SECONDS if hinted is None else hinted
             if (
-                delay is not None
-                and delay <= MAX_QUOTA_WAIT_SECONDS
+                delay <= MAX_QUOTA_WAIT_SECONDS
                 and waits_used < max_quota_waits
+                and stalled < MAX_STALLED_WAITS
             ):
                 waits_used += 1
+                stalled += 1
                 log.info(
-                    "Embedding quota hit after %d vectors; waiting %.0fs as instructed "
+                    "Embedding rate limit hit after %d vectors; waiting %.0fs %s "
                     "(pause %d of %d)",
-                    stats.computed, delay, waits_used, max_quota_waits,
+                    stats.computed, delay,
+                    "as instructed" if hinted is not None else "for the per-minute window",
+                    waits_used, max_quota_waits,
                 )
                 time.sleep(delay + 1)
                 continue  # retry the same batch; nothing was consumed from `todo`
 
-            # Either the wait is too long to be a short window, or we have paused enough
-            # times. Everything embedded so far is committed, so the next run resumes.
+            # The wait is too long to be a short window, waiting has stopped producing
+            # progress, or we have paused enough times: treat it as the daily quota.
+            # Everything embedded so far is committed, so the next run resumes.
             raise QuotaExhausted(
-                f"embedding quota exhausted after {stats.computed} new vectors this run; "
-                f"{len(todo) - stats.computed} still to do. Already-computed embeddings "
-                f"are cached, so re-running continues from here.",
+                f"Gemini's daily embedding quota is used up ({stats.computed} embedded this "
+                f"run, {len(todo) - stats.computed} still to do). Work done so far is saved.",
                 stats,
             ) from exc
 
@@ -403,6 +416,7 @@ def embed_with_cache(
         store(fresh, model, dim)  # commit per batch: a later failure cannot lose this
         cached.update(fresh)
         stats.computed += len(fresh)
+        stalled = 0
         start += batch_size
 
     return [cached[h] for h in hashes], stats
