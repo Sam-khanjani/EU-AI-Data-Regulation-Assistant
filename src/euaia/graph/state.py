@@ -1,10 +1,15 @@
-"""State passed between LangGraph nodes."""
+"""State passed between LangGraph nodes.
+
+Nodes never mutate it: each returns the fields it changed, and LangGraph merges them in.
+Two fields accumulate instead of being replaced -- ``progress`` (every node appends its step)
+and ``usage`` (every model call adds its cost) -- so they carry reducers.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+import operator
+from dataclasses import dataclass, field, replace
+from typing import Annotated, Any, NamedTuple
 
 from euaia.llm.groq_client import Usage
 from euaia.retrieval.hybrid import Candidate, RetrievedUnit
@@ -33,6 +38,12 @@ class Turn(NamedTuple):
     """A plain-text recap of the answer."""
 
 
+def _total(spent: Usage, more: Usage) -> Usage:
+    total = replace(spent)
+    total.add(more)
+    return total
+
+
 @dataclass(slots=True)
 class QueryState:
     """Everything one question accumulates on its way through the graph."""
@@ -41,6 +52,8 @@ class QueryState:
     """The question the pipeline answers: a follow-up is rewritten to stand alone first."""
     asked: str = ""
     """What the user actually typed, when it differs from ``question``."""
+    history: list[Turn] = field(default_factory=list)
+    """The conversation so far, oldest first; empty for a first question."""
 
     # analyse
     intent: str = "lookup"
@@ -48,18 +61,24 @@ class QueryState:
     referenced_articles: list[str] = field(default_factory=list)
     referenced_annexes: list[str] = field(default_factory=list)
 
-    # retrieve / rerank
+    # embed / retrieve / rerank / expand
+    query_embedding: list[float] = field(default_factory=list)
     candidates: list[Candidate] = field(default_factory=list)
     """Chunk-level hits, before reranking and expansion."""
-
-    retrieved: list[RetrievedUnit] = field(default_factory=list)
-    """Survivors, expanded to whole articles."""
+    kept: list[Candidate] = field(default_factory=list)
+    """The candidates the reranker kept."""
     evidence: list[RetrievedUnit] = field(default_factory=list)
-    """The survivors that fit the answer prompt, labelled E1..En."""
+    """The kept chunks expanded to whole provisions that fit the answer prompt, E1..En."""
     best_rerank_score: float = 0.0
 
     # generate / verify
     raw_answer: dict[str, Any] | None = None
+    overran: bool = False
+    """The last draft overran the response schema."""
+    shortened: bool = False
+    """The current draft is asked for fewer claims, after an overrun."""
+    rejected: list[str] = field(default_factory=list)
+    """Quotes that failed verification, named back to the model on the repair round."""
     report: VerificationReport | None = None
     repair_attempted: bool = False
 
@@ -72,31 +91,15 @@ class QueryState:
     criteria: list[dict[str, Any]] = field(default_factory=list)
 
     # bookkeeping
-    usage: Usage = field(default_factory=Usage)
-    progress: list[Progress] = field(default_factory=list)
+    usage: Annotated[Usage, _total] = field(default_factory=Usage)
+    progress: Annotated[list[Progress], operator.add] = field(default_factory=list)
     latency_ms: int = 0
-    query_log_id: int | None = None
-    on_progress: Callable[[Progress], None] | None = None
-    """Called with each step as it happens, so a chat interface can show the work live."""
-
-    def note(self, step: str, detail: str = "") -> None:
-        progress = Progress(step=step, detail=detail)
-        self.progress.append(progress)
-        if self.on_progress is not None:
-            self.on_progress(progress)
 
     @property
     def document_version_ids(self) -> list[int]:
         """Versions that contributed evidence -- the provenance record for this answer."""
-        seen: list[int] = []
-        for unit in self.evidence:
-            if unit.document_version_id not in seen:
-                seen.append(unit.document_version_id)
-        return seen
+        return list(dict.fromkeys(unit.document_version_id for unit in self.evidence))
 
     @property
     def retrieved_chunk_ids(self) -> list[int]:
-        ids: list[int] = []
-        for unit in self.evidence:
-            ids.extend(unit.matched_chunk_ids)
-        return ids
+        return [i for unit in self.evidence for i in unit.matched_chunk_ids]

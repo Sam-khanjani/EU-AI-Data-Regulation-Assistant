@@ -52,8 +52,12 @@ _ANNEX = re.compile(r"ANX_([IVXLC]+)")
 
 def collect(cases: list[Case]) -> dict[str, Any]:
     """Run the pipeline's own analysis and retrieval for every case, and freeze the result."""
+    from dataclasses import replace
+
+    from langgraph.runtime import Runtime
+
     from euaia.db.session import SessionLocal
-    from euaia.graph.nodes import analyse, retrieve_evidence
+    from euaia.graph.nodes import Deps, analyse, embed_query, retrieve_evidence
     from euaia.graph.state import QueryState
     from euaia.ingest.embeddings import Embedder
     from euaia.llm.groq_client import GroqClient
@@ -61,11 +65,16 @@ def collect(cases: list[Case]) -> dict[str, Any]:
     client, embedder = GroqClient(), Embedder()
     pools: dict[str, Any] = {}
     for case in cases:
-        state = analyse(QueryState(question=case.question), client)
+        with SessionLocal() as session:
+            # The graph's own nodes, run in order and stopped before reranking.
+            runtime = Runtime(context=Deps(session, client, embedder))
+            state = QueryState(question=case.question)
+            state = replace(state, **analyse(state, runtime))
+            if state.intent not in ("out_of_scope", "greeting"):
+                for node in (embed_query, retrieve_evidence):
+                    state = replace(state, **node(state, runtime))
         pool: dict[str, Any] = {"intent": state.intent, "candidates": []}
-        if state.intent != "out_of_scope":
-            with SessionLocal() as session:
-                retrieve_evidence(state, session, embedder)
+        if state.candidates:
             pool["candidates"] = [
                 {
                     "chunk_id": c.chunk_id,

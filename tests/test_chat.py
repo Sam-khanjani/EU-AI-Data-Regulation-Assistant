@@ -7,6 +7,7 @@ reason, and the follow-up rewriter is driven by a fake model client.
 from __future__ import annotations
 
 import pytest
+from langgraph.runtime import Runtime
 
 from euaia.api.service import AnswerClaim, AnswerView, Citation
 from euaia.chat import views
@@ -182,28 +183,39 @@ class TestConversationSurvivesAReload:
 
 
 class FakeClient:
+    """Answers every call with one payload that serves as a rewrite and as a greeting."""
+
     def __init__(self, standalone: str):
         self.standalone = standalone
         self.calls: list[dict] = []
 
     def structured(self, **kwargs) -> Completion:
         self.calls.append(kwargs)
-        return Completion(data={"standalone_question": self.standalone}, model=kwargs["model"])
+        data = {"standalone_question": self.standalone, "intent": "greeting", "reply": "Hi!"}
+        return Completion(data=data, model=kwargs["model"])
 
 
 HISTORY = [Turn("What are the obligations of providers of high-risk AI systems?", "Providers must...")]
 
 
+def rewrite(question: str, client: FakeClient) -> tuple[str, str]:
+    """Run the rewrite node alone: the question it leaves, and what it records as typed."""
+    state = QueryState(question, history=HISTORY)
+    update = nodes.rewrite_followup(state, Runtime(context=nodes.Deps(None, client, None)))
+    return update.get("question", question), update.get("asked", "")
+
+
 class TestFollowUpRewriting:
     def test_a_follow_up_is_answered_as_a_standalone_question(self):
         client = FakeClient("What are the obligations of deployers of high-risk AI systems?")
-        state = nodes.rewrite_followup(QueryState("what about deployers?"), HISTORY, client)
-        assert state.question == "What are the obligations of deployers of high-risk AI systems?"
-        assert state.asked == "what about deployers?"
+        assert rewrite("what about deployers?", client) == (
+            "What are the obligations of deployers of high-risk AI systems?",
+            "what about deployers?",
+        )
 
     def test_the_rewriter_sees_the_conversation_and_uses_its_schema(self):
         client = FakeClient("x")
-        nodes.rewrite_followup(QueryState("what about deployers?"), HISTORY, client)
+        rewrite("what about deployers?", client)
         call = client.calls[0]
         assert call["response_format"] is FOLLOWUP_SCHEMA
         assert call["system"] == prompts.FOLLOWUP_SYSTEM
@@ -216,46 +228,51 @@ class TestFollowUpRewriting:
         # The real client refuses anything under MIN_OUTPUT_TOKENS outright; a fake does not,
         # which is how a 512-token allowance once passed here and failed every follow-up.
         client = FakeClient("x")
-        nodes.rewrite_followup(QueryState("what about deployers?"), HISTORY, client)
+        rewrite("what about deployers?", client)
         assert client.calls[0]["max_completion_tokens"] >= MIN_OUTPUT_TOKENS
 
     @pytest.mark.parametrize("returned", ["Which AI practices are prohibited?", "   "])
     def test_an_unchanged_or_empty_rewrite_keeps_the_question(self, returned):
-        state = nodes.rewrite_followup(
-            QueryState("Which AI practices are prohibited?"), HISTORY, FakeClient(returned)
-        )
-        assert state.question == "Which AI practices are prohibited?"
-        assert state.asked == ""
+        question = "Which AI practices are prohibited?"
+        assert rewrite(question, FakeClient(returned)) == (question, "")
 
     def test_a_rejected_rewrite_falls_back_to_the_previous_question_as_context(self):
         class RejectingClient(FakeClient):
             def structured(self, **kwargs):
                 raise SchemaValidationFailed("output_parse_failed")
 
-        state = nodes.rewrite_followup(
-            QueryState("what about deployers?"), HISTORY, RejectingClient("unused")
+        assert rewrite("what about deployers?", RejectingClient("unused")) == (
+            "What are the obligations of providers of high-risk AI systems? what about deployers?",
+            "what about deployers?",
         )
-        assert state.question == (
-            "What are the obligations of providers of high-risk AI systems? what about deployers?"
-        )
-        assert state.asked == "what about deployers?"
 
-    def test_the_first_question_of_a_conversation_costs_no_rewrite(self, monkeypatch):
+
+class TestTheGraph:
+    """The whole graph, run on its small-talk path so no database or embedder is needed."""
+
+    def test_the_first_question_of_a_conversation_costs_no_rewrite(self):
         client = FakeClient("should not be used")
+        nodes.run_pipeline("hello!", None, client, None)
+        assert [c["system"] for c in client.calls] == [prompts.ANALYSIS_SYSTEM]
 
-        def stop(state, _client):
-            raise StopIteration
+    def test_a_follow_up_is_rewritten_before_it_is_analysed(self):
+        client = FakeClient("hello again")
+        state = nodes.run_pipeline("hi", None, client, None, history=HISTORY)
+        assert [c["system"] for c in client.calls] == [
+            prompts.FOLLOWUP_SYSTEM, prompts.ANALYSIS_SYSTEM
+        ]
+        assert (state.question, state.asked) == ("hello again", "hi")
 
-        monkeypatch.setattr(nodes, "analyse", stop)
-        with pytest.raises(StopIteration):
-            nodes.run_pipeline("Which AI practices are prohibited?", None, client, None)
-        assert client.calls == []
-
-
-class TestProgressIsReportedLive:
     def test_each_step_reaches_the_listener_as_it_happens(self):
         heard: list[Progress] = []
-        state = QueryState("q", on_progress=heard.append)
-        state.note("retrieving", "searching")
-        state.note("done")
-        assert heard == state.progress == [Progress("retrieving", "searching"), Progress("done")]
+        state = nodes.run_pipeline("hello!", None, FakeClient("x"), None, on_progress=heard.append)
+        assert [p.step for p in heard] == ["analysing", "abstaining"]
+        assert heard == state.progress
+        assert state.verdict == "abstained"
+        assert state.abstain_reason == f"Hi! {nodes.HELP_OFFER}"
+
+    def test_every_decision_is_an_edge_of_the_drawn_graph(self):
+        drawn = nodes.GRAPH.get_graph().draw_mermaid()
+        for edge in ("analyse -.-> abstain", "generate -.-> shorten", "verify -.-> repair",
+                     "repair --> generate", "expand_evidence -.-> abstain"):
+            assert edge in drawn

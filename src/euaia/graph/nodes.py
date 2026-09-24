@@ -1,25 +1,21 @@
-"""Pipeline nodes.
+"""The answer pipeline, as a LangGraph ``StateGraph`` (drawn in the README).
 
-    analyse -> retrieve -> rerank -> sufficiency gate -> generate -> verify -> repair?
-                                          |                                      |
-                                          +------------- abstain <---------------+
+Every node takes the state and the runtime context (:class:`Deps`) and returns only the
+fields it changed; every decision is an edge:
 
-In a conversation, a follow-up is first rewritten to stand alone (:func:`rewrite_followup`),
-so everything above still sees a single question.
+* a follow-up is first rewritten to stand alone, so everything after it sees one question;
+* small talk and out-of-scope questions stop before anything is searched;
+* **sufficiency**, before generation: if nothing retrieved scores above the relevance
+  threshold, we abstain without calling the answer model -- asking it to ground an answer in
+  evidence that does not address the question is how systems produce confident nonsense;
+* a draft that overruns the response schema is asked for once more with fewer claims;
+* **repair**: rejected quotes are named back to the model once, and it is asked to quote
+  again. We never adjust a quote on the model's behalf -- see ``euaia.verify.citations``;
+* **coverage**, in finalise: how much of what the model said survived checking decides
+  between answering, degrading to partial, and abstaining.
 
-Two gates decide whether anything is said at all:
-
-**Sufficiency** runs before generation. If nothing retrieved scores above the relevance
-threshold, we abstain without calling the answer model -- there is no point asking it to
-ground an answer in evidence that does not address the question, and doing so is how systems
-end up producing confident nonsense from irrelevant context.
-
-**Coverage** runs after verification. It measures how much of what the model said actually
-survived checking, and decides between answering, degrading to partial, and abstaining.
-
-Between them sits at most one repair round trip: rejected quotes are named back to the model
-and it is asked to quote again. Note what repair is *not* -- we never adjust a quote on the
-model's behalf to make it match. See ``euaia.verify.citations`` for why.
+Progress is streamed as each node starts (LangGraph's ``custom`` stream), so the chat shows
+the work live.
 """
 
 from __future__ import annotations
@@ -28,8 +24,11 @@ import logging
 import re
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, fields, replace
+from typing import Any
 
+from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
 from sqlalchemy.orm import Session
 
 from euaia.config import settings
@@ -76,81 +75,100 @@ UNSUPPORTED_REASON = (
     "A draft answer was produced but too little of it could be verified against the "
     "regulation text, so it has been withheld."
 )
+OVERRAN_REASON = (
+    "The answer could not be produced within the response limits available on this plan."
+)
+_NO_SEARCH = ("out_of_scope", "greeting")
+
+Update = dict[str, Any]
+"""What a node returns: only the state fields it changed."""
 
 
-def rewrite_followup(state: QueryState, history: Sequence[Turn], client: GroqClient) -> QueryState:
+@dataclass(slots=True)
+class Deps:
+    """The graph's runtime context: what nodes use but never pass along in the state."""
+
+    session: Session
+    client: GroqClient
+    embedder: Embedder
+
+
+def _note(runtime: Runtime[Deps], step: str, detail: str = "") -> list[Progress]:
+    """Stream a step to whoever is watching as it starts, and return it for the state."""
+    progress = Progress(step=step, detail=detail)
+    runtime.stream_writer(progress)
+    return [progress]
+
+
+def _ask_small_model(runtime: Runtime[Deps], system: str, user: str, schema: dict):
+    """The cheap model, for routing steps. Short answers, but the model reasons first, and the
+    client refuses an allowance below MIN_OUTPUT_TOKENS."""
+    return runtime.context.client.structured(
+        system=system, user=user, response_format=schema, model=settings.groq_small_model,
+        max_completion_tokens=1024, reasoning_effort="low",
+    )
+
+
+# ------------------------------------------------------------------------ nodes
+
+
+def rewrite_followup(state: QueryState, runtime: Runtime[Deps]) -> Update:
     """Turn a follow-up such as "what about deployers?" into a question that stands alone.
 
-    Everything downstream -- retrieval, the answer prompt, the audit row -- sees one question
-    and no conversation, which keeps the grounding argument unchanged: the rewritten question
-    is answered from the evidence exactly as a typed one would be. The rewrite only decides
-    *what* is asked. What the user typed is kept in ``state.asked``.
+    Everything downstream sees one question and no conversation, so the rewritten question
+    is answered from the evidence exactly as a typed one would be. What the user typed is
+    kept in ``asked``.
     """
-    state.note("rewriting", "reading the conversation so far")
+    update: Update = {"progress": _note(runtime, "rewriting", "reading the conversation so far")}
     try:
-        completion = client.structured(
-            system=prompts.FOLLOWUP_SYSTEM,
-            user=prompts.followup_prompt(history, state.question),
-            response_format=FOLLOWUP_SCHEMA,
-            model=settings.groq_small_model,
-            # A short answer, but the model reasons before writing it, and the client refuses
-            # any allowance below MIN_OUTPUT_TOKENS.
-            max_completion_tokens=1024,
-            reasoning_effort="low",
+        completion = _ask_small_model(
+            runtime, prompts.FOLLOWUP_SYSTEM,
+            prompts.followup_prompt(state.history, state.question), FOLLOWUP_SCHEMA,
         )
     except SchemaValidationFailed:
-        # The rewrite only steers the search; whatever is asked is still answered from
-        # verified evidence. So a failed rewrite should cost some precision, not the answer:
-        # search with the previous question alongside the new message.
+        # A failed rewrite should cost some precision, not the answer: search with the
+        # previous question alongside the new message.
         log.warning("Follow-up rewrite was rejected; searching with the previous question too")
-        standalone = f"{history[-1].question} {state.question}"
+        standalone = f"{state.history[-1].question} {state.question}"
     else:
-        state.usage.add(completion.usage)
+        update["usage"] = completion.usage
         standalone = str(completion.data.get("standalone_question") or "").strip()
 
     if standalone and standalone != state.question:
-        state.asked, state.question = state.question, standalone
-        state.note("rewritten", standalone)
-    return state
+        update |= {"asked": state.question, "question": standalone}
+        update["progress"] += _note(runtime, "rewritten", standalone)
+    return update
 
 
-def analyse(state: QueryState, client: GroqClient) -> QueryState:
+def analyse(state: QueryState, runtime: Runtime[Deps]) -> Update:
     """Classify intent, expand the query, and pick up any provision the user named."""
-    state.note("analysing", "classifying the question")
-    completion = client.structured(
-        system=prompts.ANALYSIS_SYSTEM,
-        user=state.question,
-        response_format=QUERY_ANALYSIS_SCHEMA,
-        model=settings.groq_small_model,
-        max_completion_tokens=1024,
-        reasoning_effort="low",
+    progress = _note(runtime, "analysing", "classifying the question")
+    completion = _ask_small_model(
+        runtime, prompts.ANALYSIS_SYSTEM, state.question, QUERY_ANALYSIS_SCHEMA
     )
-    state.usage.add(completion.usage)
-
     data = completion.data
-    state.intent = _corrected_intent(data.get("intent", "lookup"), state.question)
-    state.search_queries = [q for q in data.get("search_queries", []) if q.strip()]
-    state.referenced_articles = [
-        a.strip() for a in data.get("referenced_articles", []) if a.strip()
-    ]
-    state.referenced_annexes = [a.strip() for a in data.get("referenced_annexes", []) if a.strip()]
-    if state.intent == "greeting":
+    update: Update = {
+        "progress": progress,
+        "usage": completion.usage,
+        "intent": _corrected_intent(data.get("intent", "lookup"), state.question),
+        "search_queries": [q for q in data.get("search_queries", []) if q.strip()],
+        **{
+            key: [a.strip() for a in data.get(key, []) if a.strip()]
+            for key in ("referenced_articles", "referenced_annexes")
+        },
+    }
+    if update["intent"] == "greeting":
         reply = str(data.get("reply") or "").strip()
-        state.abstain_reason = (
+        update["abstain_reason"] = (
             f"{reply} {HELP_OFFER}" if 0 < len(reply) <= _MAX_GREETING_CHARS else HELP_OFFER
         )
-
-    log.debug(
-        "intent=%s queries=%s articles=%s annexes=%s",
-        state.intent, state.search_queries, state.referenced_articles, state.referenced_annexes,
-    )
-    return state
+    log.debug("analysis: %s", update)
+    return update
 
 
-# A question naming the Act, or a provision of it, is about the Act. The classifier is a
-# cheap heuristic and gets to *route*, not to veto the corpus: "What does the AI Act say
-# about AI literacy?" was classified out_of_scope and refused in 181ms, without retrieval,
-# even though AI literacy is Article 4. This overrides that specific failure deterministically.
+# A question naming the Act, or a provision of it, is about the Act. The classifier gets to
+# *route*, not to veto the corpus: "What does the AI Act say about AI literacy?" was once
+# classified out_of_scope and refused without retrieval, though AI literacy is Article 4.
 _NAMES_THE_ACT = re.compile(
     r"\bai act\b"
     r"|\bartificial intelligence act\b"
@@ -169,64 +187,214 @@ def _corrected_intent(intent: str, question: str) -> str:
     Covers ``greeting`` too: "hi! what does Article 5 say?" is a question, and small talk
     must never be how a real question goes unanswered.
     """
-    if intent in ("out_of_scope", "greeting") and _NAMES_THE_ACT.search(question):
+    if intent in _NO_SEARCH and _NAMES_THE_ACT.search(question):
         log.info("Overriding %s: the question names the Act or one of its provisions", intent)
         return "lookup"
     return intent
 
 
-def retrieve_evidence(
-    state: QueryState, session: Session, embedder: Embedder
-) -> QueryState:
-    """Embed the question and run the three retrieval legs, at chunk granularity."""
-    state.note("retrieving", "searching the indexed regulation")
-    embedding = embedder.embed_query(state.question)
-    state.candidates = retrieve(
-        session,
+def embed_query(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Embed the question for the dense leg of retrieval."""
+    return {
+        "progress": _note(runtime, "retrieving", "searching the indexed regulation"),
+        "query_embedding": runtime.context.embedder.embed_query(state.question),
+    }
+
+
+def retrieve_evidence(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Run the three retrieval legs, at chunk granularity."""
+    return {"candidates": retrieve(
+        runtime.context.session,
         query=state.question,
-        embedding=embedding,
+        embedding=state.query_embedding,
         search_queries=state.search_queries,
         articles=state.referenced_articles,
         annexes=state.referenced_annexes,
-    )
-    log.debug("retrieved %d candidate chunks", len(state.candidates))
-    return state
+    )}
 
 
-def rerank_evidence(state: QueryState, session: Session) -> QueryState:
-    """Score the chunks, then expand the survivors to whole articles.
-
-    Expansion happens *after* scoring so the reranker sees ~99-token passages rather than
-    ~530-token articles -- both cheaper and a truer measure of relevance.
-
-    Scoring is local (:mod:`euaia.retrieval.rerank`), so this node spends no API tokens and
-    takes no rate-limiter budget. It no longer needs the Groq client.
-    """
-    state.note("reranking", f"scoring {len(state.candidates)} candidate passages")
+def rerank_evidence(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Score the ~99-token chunks, before expansion: cheaper, and a truer measure."""
+    progress = _note(runtime, "reranking", f"scoring {len(state.candidates)} candidate passages")
     result = rerank(state.question, state.candidates)
-    state.usage.add(result.usage)
-    state.best_rerank_score = result.best_score
+    return {
+        "progress": progress,
+        "usage": result.usage,
+        "best_rerank_score": result.best_score,
+        "kept": result.kept,
+    }
 
-    if not result.kept:
-        state.evidence = []
-        return state
 
-    state.note("expanding", f"reading {len(result.kept)} provisions in full")
-    units = expand_to_units(session, result.kept)
-    # Authority orders the units *before* the budget is spent, not after. Ordering afterwards
-    # looks equivalent and is not: reranking reserves a slot for binding text but appends it
-    # last, so spending the budget in relevance order let a long provision like Article 50 be
-    # promoted into the evidence and then dropped for want of room -- leaving an answer about
-    # legal obligations resting entirely on guidance and a voluntary code.
-    units = fit_token_budget(by_authority(units), settings.evidence_token_budget)
-    # Code units are read inside their commitment, as paragraphs are read inside articles:
-    # in full with what is left of the same budget, the rest as an outline of headings, so
-    # every part is at least named. The prompt budget below has the last word.
+def expand_evidence(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Expand the kept chunks to whole provisions and fit them to the answer prompt."""
+    if not state.kept:
+        return {"evidence": []}
+    progress = _note(runtime, "expanding", f"reading {len(state.kept)} provisions in full")
+    session = runtime.context.session
+    # Authority orders the units *before* the budget is spent: in relevance order, a long
+    # binding provision like Article 50 was promoted and then dropped for want of room.
+    units = fit_token_budget(
+        by_authority(expand_to_units(session, state.kept)), settings.evidence_token_budget
+    )
+    # Code units are read inside their commitment, with what is left of the same budget.
     spent = sum(estimate_tokens(u.text) for u in units)
     units = with_structure(session, units, max(0, settings.evidence_token_budget - spent))
-    state.retrieved = units
-    state.evidence = _fit_to_prompt_budget(label_units(units), state)
+    return {"progress": progress, "evidence": _fit_to_prompt_budget(label_units(units), state)}
+
+
+def generate(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Produce a structured, quote-carrying answer under a strict schema.
+
+    Groq returns 400 when the response misses a field, which in practice means the model ran
+    long and closed the object early: recoverable, by asking for fewer claims.
+    """
+    progress = _note(runtime, "generating", "drafting an answer from the retrieved provisions")
+    max_claims = settings.max_claims_retry if state.shortened else settings.max_claims
+    system, user = _answer_prompts(state, state.evidence, max_claims, state.rejected or None)
+    try:
+        completion = runtime.context.client.structured(
+            system=system,
+            user=user,
+            response_format=ASSESSMENT_SCHEMA if state.intent == "applicability" else ANSWER_SCHEMA,
+            model=settings.groq_model,
+            # Evidence + output must fit the free tier's 8k tokens/minute.
+            max_completion_tokens=settings.answer_max_tokens,
+            # Low: this is selection and verbatim copying, and deliberation competes with the
+            # answer for the minute budget.
+            reasoning_effort="low",
+        )
+    except SchemaValidationFailed:
+        log.warning("Answer overran the schema (shortened=%s)", state.shortened)
+        return {"progress": progress, "overran": True, "raw_answer": None}
+    return {
+        "progress": progress,
+        "usage": completion.usage,
+        "overran": False,
+        "raw_answer": completion.data,
+    }
+
+
+def shorten(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """After an overrun, ask for the answer again with fewer claims."""
+    detail = "the first draft overran; asking for a shorter answer"
+    return {"progress": _note(runtime, "retrying", detail), "shortened": True}
+
+
+def verify(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Check every quote against the unit text shown to the model as its evidence block."""
+    data = state.raw_answer or {}
+    if state.intent == "applicability":
+        # Quotes per criterion rather than per claim; the grounding requirement is the same.
+        claims = [
+            {"text": _criterion_text(c), "supporting_quotes": c.get("supporting_quotes", [])}
+            for c in data.get("criteria", [])
+        ]
+    else:
+        claims = data.get("claims", [])
+    names = [f.name for f in fields(Evidence)]
+    evidence = [Evidence(**{n: getattr(u, n) for n in names}) for u in state.evidence]
+    return {
+        "progress": _note(runtime, "verifying", "checking every quote against the regulation text"),
+        "report": verify_answer(claims, evidence),
+    }
+
+
+def repair(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Name the rejected quotes back to the model, for one more draft at full length."""
+    return {
+        "progress": _note(runtime, "repairing", "asking the model to quote the source exactly"),
+        "repair_attempted": True,
+        "shortened": False,
+        "rejected": state.report.unsupported_quote_texts(),
+    }
+
+
+def finalise(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Apply the coverage gate and assemble what the user actually sees."""
+    update = _outcome(state)
+    return update | {"progress": _note(runtime, "done", update["verdict"])}
+
+
+def abstain(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Stop without an answer: small talk, out of scope, or nothing relevant found."""
+    detail, reason = {
+        # A greeting's reply was set in `analyse`.
+        "greeting": ("small talk", state.abstain_reason),
+        "out_of_scope": ("outside the indexed corpus", OUT_OF_SCOPE_REASON),
+    }.get(state.intent, ("no sufficiently relevant provisions found", NO_EVIDENCE_REASON))
+    return {
+        "progress": _note(runtime, "abstaining", detail),
+        "verdict": "abstained",
+        "abstain_reason": reason,
+    }
+
+
+# ------------------------------------------------------------------------ the graph
+
+
+def build_graph():
+    """Wire the nodes and decisions into a compiled graph."""
+    graph = StateGraph(QueryState, context_schema=Deps)
+    for node in (rewrite_followup, analyse, generate, shorten, verify, repair, finalise, abstain):
+        graph.add_node(node)
+    graph.add_sequence([embed_query, retrieve_evidence, rerank_evidence, expand_evidence])
+
+    def route(source: str, decide: Callable[[QueryState], bool], yes: str, no: str) -> None:
+        graph.add_conditional_edges(source, lambda s: yes if decide(s) else no, [yes, no])
+
+    # A first question costs no rewrite.
+    route(START, lambda s: bool(s.history), "rewrite_followup", "analyse")
+    graph.add_edge("rewrite_followup", "analyse")
+    route("analyse", lambda s: s.intent in _NO_SEARCH, "abstain", "embed_query")
+    route(
+        "expand_evidence",
+        lambda s: bool(s.evidence) and s.best_rerank_score >= settings.rerank_min_score,
+        "generate", "abstain",
+    )
+    # One shorter retry; a second overrun is verified as empty and abstains.
+    route("generate", lambda s: s.overran and not s.shortened, "shorten", "verify")
+    graph.add_edge("shorten", "generate")
+    # One repair, only if something was rejected and something might be salvageable.
+    route(
+        "verify",
+        lambda s: not s.repair_attempted and bool(s.report.rejected)
+        and s.report.coverage < settings.coverage_answer_threshold,
+        "repair", "finalise",
+    )
+    graph.add_edge("repair", "generate")
+    graph.add_edge("finalise", END)
+    graph.add_edge("abstain", END)
+    return graph.compile()
+
+
+GRAPH = build_graph()
+
+
+def run_pipeline(
+    question: str,
+    session: Session,
+    client: GroqClient,
+    embedder: Embedder,
+    history: Sequence[Turn] = (),
+    on_progress: Callable[[Progress], None] | None = None,
+) -> QueryState:
+    """Run the graph for one question; ``on_progress`` hears about each step as it starts."""
+    started = time.perf_counter()
+    initial = QueryState(question=question, history=list(history[-settings.followup_turns :]))
+    final: dict[str, Any] = {}
+    for mode, chunk in GRAPH.stream(
+        initial, context=Deps(session, client, embedder), stream_mode=["custom", "values"]
+    ):
+        if mode == "values":
+            final = chunk
+        elif on_progress is not None:
+            on_progress(chunk)
+    state = QueryState(**final)
+    state.latency_ms = int((time.perf_counter() - started) * 1000)
     return state
+
+
+# ------------------------------------------------------------------------ helpers
 
 
 def _answer_prompts(
@@ -237,10 +405,10 @@ def _answer_prompts(
 ) -> tuple[str, str]:
     """System and user prompt for the answer call, or the criteria assessment's."""
     assessment = state.intent == "applicability"
-    if assessment:
-        system = prompts.ASSESSMENT_SYSTEM
-    else:
-        system = prompts.ANSWER_SYSTEM.format(max_claims=max_claims)
+    system = (
+        prompts.ASSESSMENT_SYSTEM if assessment
+        else prompts.ANSWER_SYSTEM.format(max_claims=max_claims)
+    )
     user = prompts.user_prompt(
         state.question, prompts.format_evidence(evidence), rejected, assessment=assessment
     )
@@ -250,18 +418,12 @@ def _answer_prompts(
 def _fit_to_prompt_budget(
     evidence: list[RetrievedUnit], state: QueryState
 ) -> list[RetrievedUnit]:
-    """Trim evidence until the assembled prompt fits the minute budget.
+    """Trim evidence until the *actual* assembled prompt fits the minute budget.
 
-    Sized against the *actual* prompt rather than an estimate: an earlier version budgeted
-    statically and was wrong by about 1,200 tokens once evidence headers and separators were
-    counted, which made every answer call impossible to issue.
-
-    Runs before the sufficiency gate so that a question whose evidence cannot fit abstains
-    without spending an answer call on a prompt containing nothing.
+    A static estimate was once wrong by ~1,200 tokens of headers and separators, which made
+    every answer call impossible to issue. Room is left for the repair note, and the budget
+    is read from Limits so it cannot drift from what the rate limiter enforces.
     """
-    # Leave room for the repair note, which is only added on a retry.
-    # Sized against the budget the rate limiter will actually enforce, not the provider's
-    # raw ceiling, and read from Limits so the two cannot drift apart.
     usable = (
         Limits(tokens_per_minute=settings.groq_tpm).usable_tpm
         - settings.answer_max_tokens
@@ -274,14 +436,10 @@ def _fit_to_prompt_budget(
     kept = list(evidence)
     while len(kept) > 1 and not fits(kept):
         kept = kept[:-1]  # drop the lowest-ranked provision first
-
     if kept and not fits(kept):
-        # A single provision too large to fit at all -- Article 5 is ~3,000 tokens on its
-        # own. Truncating what the model *sees* is safe: quotes are still verified against
-        # the unit's full text, so a quote copied from the visible part still passes and
-        # the model cannot quote what it was not shown.
+        # One provision too large on its own (Article 5 is ~3,000 tokens). Truncating what
+        # the model *sees* is safe: quotes are still verified against the full text.
         kept = [_truncate(kept[0], fits)]
-
     if len(kept) < len(evidence):
         log.info("Trimmed evidence from %d to %d units", len(evidence), len(kept))
     # Relabel so the model is given a gap-free E1..En.
@@ -302,238 +460,42 @@ def _truncate(
     return unit
 
 
-def evidence_is_sufficient(state: QueryState) -> bool:
-    """Gate before generation: is there anything worth grounding an answer in?"""
-    if state.intent == "out_of_scope":
-        state.abstain_reason = OUT_OF_SCOPE_REASON
-        return False
-    if not state.evidence:
-        state.abstain_reason = NO_EVIDENCE_REASON
-        return False
-    if state.best_rerank_score < settings.rerank_min_score:
-        state.abstain_reason = NO_EVIDENCE_REASON
-        return False
-    return True
-
-
-def _evidence_records(state: QueryState) -> list[Evidence]:
-    """Bridge retrieval output into what the verifier checks against.
-
-    ``text`` is the unit's own text -- the same string shown to the model as its evidence
-    block -- so a faithfully copied quote always verifies, and a breadcrumb we synthesised
-    never can.
-    """
-    return [
-        Evidence(
-            label=unit.label,
-            unit_id=unit.unit_id,
-            unit_path=unit.unit_path,
-            citation_label=unit.citation_label,
-            text=unit.text,
-            deeplink=unit.deeplink,
-            document_version_id=unit.document_version_id,
-            version_label=unit.version_label,
-            authority=unit.authority,
-        )
-        for unit in state.evidence
-    ]
-
-
-def generate(
-    state: QueryState, client: GroqClient, rejected: list[str] | None = None
-) -> QueryState:
-    """Produce a structured, quote-carrying answer under a strict schema.
-
-    A schema rejection is recoverable, not fatal. Groq validates the response and returns
-    400 when a field is missing, which in practice means the model ran long and closed the
-    object early. Asking again for fewer claims usually fits; if it still does not, the
-    caller abstains rather than presenting a partial answer as a whole one.
-    """
-    try:
-        return _generate_once(state, client, rejected, settings.max_claims)
-    except SchemaValidationFailed:
-        log.warning("Answer overran the schema; retrying with fewer claims")
-        state.note("retrying", "the first draft overran; asking for a shorter answer")
-        try:
-            return _generate_once(state, client, rejected, settings.max_claims_retry)
-        except SchemaValidationFailed:
-            log.warning("Answer overran again; abstaining")
-            state.raw_answer = None
-            state.abstain_reason = (
-                "The answer could not be produced within the response limits available on "
-                "this plan."
-            )
-            return state
-
-
-def _generate_once(
-    state: QueryState,
-    client: GroqClient,
-    rejected: list[str] | None,
-    max_claims: int,
-) -> QueryState:
-    state.note("generating", "drafting an answer from the retrieved provisions")
-    # Evidence was already sized to the budget in rerank_evidence.
-    system, user = _answer_prompts(state, state.evidence, max_claims, rejected)
-
-    completion = client.structured(
-        system=system,
-        user=user,
-        response_format=ASSESSMENT_SCHEMA if state.intent == "applicability" else ANSWER_SCHEMA,
-        model=settings.groq_model,
-        # Sized so evidence + output stays inside the free tier's 8k tokens/minute.
-        # The client raises rather than silently truncating if it does not.
-        max_completion_tokens=settings.answer_max_tokens,
-        # Low, deliberately. This task is selection and verbatim copying, not reasoning:
-        # the provisions have already been retrieved and ranked. Higher effort spends
-        # completion tokens on deliberation that competes with the answer itself for the
-        # minute budget, and overrunning gets the whole response rejected.
-        reasoning_effort="low",
-    )
-    state.usage.add(completion.usage)
-    state.raw_answer = completion.data
-    return state
-
-
-def _claims_from_answer(state: QueryState) -> list[dict]:
-    """Normalise both answer shapes into the claim list the verifier expects.
-
-    A criteria assessment carries its quotes per criterion rather than per claim, but the
-    grounding requirement is identical, so both go through the same verifier.
-    """
-    data = state.raw_answer or {}
-    if state.intent == "applicability":
-        return [
-            {
-                "text": _criterion_text(c),
-                "supporting_quotes": c.get("supporting_quotes", []),
-            }
-            for c in data.get("criteria", [])
-        ]
-    return data.get("claims", [])
-
-
 def _criterion_text(criterion: dict) -> str:
     """A criterion as a claim -- also the key that matches verified claims back to it."""
     return f"{criterion.get('criterion', '')} - {criterion.get('explanation', '')}".strip(" -")
 
 
-def verify(state: QueryState) -> QueryState:
-    """Check every quote against the source it names."""
-    state.note("verifying", "checking every quote against the regulation text")
-    state.report = verify_answer(_claims_from_answer(state), _evidence_records(state))
-    return state
-
-
-def needs_repair(state: QueryState) -> bool:
-    """One retry, only if something was rejected and something might be salvageable."""
-    if state.repair_attempted or state.report is None:
-        return False
-    if not state.report.rejected:
-        return False
-    return state.report.coverage < settings.coverage_answer_threshold
-
-
-def finalise(state: QueryState) -> QueryState:
-    """Apply the coverage gate and assemble what the user actually sees."""
-    data = state.raw_answer or {}
-    report = state.report
-
+def _outcome(state: QueryState) -> Update:
+    """The verdict and what is shown with it."""
+    data, report = state.raw_answer or {}, state.report
     if report is None or not report.claims:
-        state.verdict = "abstained"
-        state.abstain_reason = state.abstain_reason or (
-            data.get("abstain_reason") or UNSUPPORTED_REASON
-        )
-        return state
-
+        reason = OVERRAN_REASON if state.overran else data.get("abstain_reason")
+        return {"verdict": "abstained", "abstain_reason": reason or UNSUPPORTED_REASON}
     # A model that declared itself unable to answer is believed, even if some quote verified.
     if state.intent != "applicability" and data.get("answerable") is False:
-        state.verdict = "abstained"
-        state.abstain_reason = data.get("abstain_reason") or NO_EVIDENCE_REASON
-        return state
+        reason = data.get("abstain_reason") or NO_EVIDENCE_REASON
+        return {"verdict": "abstained", "abstain_reason": reason}
+    verdict = decide_verdict(report)
+    if verdict == "abstained":
+        return {"verdict": verdict, "abstain_reason": UNSUPPORTED_REASON}
 
-    state.verdict = decide_verdict(report)
-    if state.verdict == "abstained":
-        state.abstain_reason = UNSUPPORTED_REASON
-        return state
-
-    state.summary = (data.get("framing") or data.get("summary") or "").strip()
-    state.unanswered_aspects = list(data.get("unanswered_aspects") or [])
-    state.follow_up_questions = list(data.get("follow_up_questions") or [])
+    update: Update = {
+        "verdict": verdict,
+        "summary": (data.get("framing") or data.get("summary") or "").strip(),
+        "unanswered_aspects": list(data.get("unanswered_aspects") or []),
+        "follow_up_questions": list(data.get("follow_up_questions") or []),
+    }
     if state.intent == "applicability":
-        state.criteria = _verified_criteria(state)
-    return state
-
-
-def _verified_criteria(state: QueryState) -> list[dict]:
-    """Keep only assessment criteria whose quotes survived verification."""
-    if state.report is None:
-        return []
-    surviving = {c.text: c for c in state.report.claims}
-    out = []
-    for criterion in (state.raw_answer or {}).get("criteria", []):
-        verified = surviving.get(_criterion_text(criterion))
-        if verified is None:
-            continue
-        out.append(
+        # Only criteria whose quotes survived verification.
+        surviving = {c.text: c for c in report.claims}
+        update["criteria"] = [
             {
-                "criterion": criterion.get("criterion", ""),
-                "status": criterion.get("status", "needs_user_input"),
-                "explanation": criterion.get("explanation", ""),
-                "quotes": verified.quotes,
+                "criterion": c.get("criterion", ""),
+                "status": c.get("status", "needs_user_input"),
+                "explanation": c.get("explanation", ""),
+                "quotes": surviving[key].quotes,
             }
-        )
-    return out
-
-
-def run_pipeline(
-    question: str,
-    session: Session,
-    client: GroqClient,
-    embedder: Embedder,
-    history: Sequence[Turn] = (),
-    on_progress: Callable[[Progress], None] | None = None,
-) -> QueryState:
-    """Execute the whole graph for one question.
-
-    ``history`` is the conversation so far, oldest first; with none, the question is taken
-    as typed. ``on_progress`` hears about each step as it starts.
-    """
-    started = time.perf_counter()
-    state = QueryState(question=question, on_progress=on_progress)
-
-    if history:
-        rewrite_followup(state, history[-settings.followup_turns :], client)
-    analyse(state, client)
-    if state.intent in ("out_of_scope", "greeting"):
-        # Nothing is searched and nothing is generated: a greeting's reply is the model's
-        # one short sentence plus fixed text, set in `analyse`.
-        greeting = state.intent == "greeting"
-        state.note("abstaining", "small talk" if greeting else "outside the indexed corpus")
-        state.verdict = "abstained"
-        state.abstain_reason = state.abstain_reason if greeting else OUT_OF_SCOPE_REASON
-        state.latency_ms = int((time.perf_counter() - started) * 1000)
-        return state
-
-    retrieve_evidence(state, session, embedder)
-    rerank_evidence(state, session)
-
-    if not evidence_is_sufficient(state):
-        state.note("abstaining", "no sufficiently relevant provisions found")
-        state.verdict = "abstained"
-        state.latency_ms = int((time.perf_counter() - started) * 1000)
-        return state
-
-    generate(state, client)
-    verify(state)
-
-    if needs_repair(state):
-        state.note("repairing", "asking the model to quote the source exactly")
-        state.repair_attempted = True
-        generate(state, client, rejected=state.report.unsupported_quote_texts())
-        verify(state)
-
-    finalise(state)
-    state.latency_ms = int((time.perf_counter() - started) * 1000)
-    state.note("done", state.verdict)
-    return state
+            for c in data.get("criteria", [])
+            if (key := _criterion_text(c)) in surviving
+        ]
+    return update

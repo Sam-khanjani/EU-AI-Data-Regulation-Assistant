@@ -103,6 +103,27 @@ shows the verified quote, clicking opens the provision on EUR-Lex. A follow-up s
 about providers?" is first rewritten into a standalone question, so retrieval and verification
 still work on one self-contained question. Conversations are saved per user.
 
+The answer pipeline is a LangGraph `StateGraph` ([`graph/nodes.py`](src/euaia/graph/nodes.py)).
+Every step is a node that returns only what it changed, and every decision is an edge
+(dotted below), so this diagram is the whole control flow. It is a labelled version of what
+`GRAPH.get_graph().draw_mermaid()` prints:
+
+```mermaid
+graph TD;
+	__start__([start]) -.-> rewrite_followup & analyse
+	rewrite_followup --> analyse
+	analyse -.->|small talk, out of scope| abstain
+	analyse -.-> embed_query --> retrieve_evidence --> rerank_evidence --> expand_evidence
+	expand_evidence -.->|too little evidence| abstain
+	expand_evidence -.-> generate
+	generate -.->|overran the schema| shorten --> generate
+	generate -.-> verify
+	verify -.->|quotes rejected| repair --> generate
+	verify -.-> finalise
+	abstain --> __end__([end])
+	finalise --> __end__
+```
+
 ## Stack
 
 | Layer | Choice |
@@ -442,7 +463,7 @@ uv run python -m eval.harness   # scored against a seeded question set
 src/euaia/
   ingest/     CELLAR client, PDF readers, chunker, embedder, pipeline
   retrieval/  hybrid dense + full-text + structural lookup, reranker
-  graph/      pipeline nodes, state, prompts
+  graph/      the LangGraph answer graph: nodes and edges, state, prompts
   llm/        Groq client and structured-output schemas
   verify/     text normalisation and citation verification
   chat/       Chainlit chat: sign-in, saved conversations, how answers are shown
