@@ -202,5 +202,15 @@ class Settings(BaseSettings):
     # Where the admin dashboard links to for the chat.
     chat_url: str = "http://127.0.0.1:8001"
 
+    # --- Monitoring (Langfuse; `docker compose --profile monitoring up -d`) ---
+    # Off by default. The keys match the project docker-compose.yml creates on first start;
+    # Docker overrides the host with the in-network address. The dashboard links traces to
+    # langfuse_public_url, which is the browser's view of the same server.
+    langfuse_enabled: bool = False
+    langfuse_host: str = "http://localhost:3000"
+    langfuse_public_url: str = "http://localhost:3000"
+    langfuse_public_key: str = "pk-lf-euaia-local"
+    langfuse_secret_key: str = "sk-lf-euaia-local"
+
 
 settings = Settings()

@@ -172,7 +172,9 @@ RULES
 6. The summary answers the question directly in two or three sentences. It may not
    introduce anything that is not also stated in a claim.
 7. If the evidence does not answer the question, set answerable to false and explain what is
-   missing. Abstaining is a correct answer, not a failure.
+   missing. Abstaining is a correct answer, not a failure. But when the question asks several
+   things and the evidence answers some of them, answer those and list the rest in
+   unanswered_aspects: set answerable to false only when it answers none of what is asked.
 8. Never rely on background knowledge of the AI Act. If it is not in the evidence, it does
    not exist for this answer.
 9. Do not give legal advice or state a legal conclusion about the user's own system.

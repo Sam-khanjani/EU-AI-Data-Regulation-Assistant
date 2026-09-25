@@ -40,6 +40,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Send
 from sqlalchemy.orm import Session
 
+from euaia import observability
 from euaia.config import settings
 from euaia.graph import prompts
 from euaia.graph.state import (
@@ -62,6 +63,7 @@ from euaia.llm.schemas import (
     REVIEW_SCHEMA,
     WRAPUP_SCHEMA,
 )
+from euaia.observability import timed_node
 from euaia.retrieval.hybrid import (
     RetrievedUnit,
     by_authority,
@@ -537,8 +539,11 @@ def _after_collect(state: QueryState) -> str:
 
 def build_graph():
     """Wire the nodes and decisions into a compiled graph, with search as a subgraph."""
+    # Every node is timed into the state, for the dashboard; Langfuse traces them itself.
     research = StateGraph(SearchTask, context_schema=Deps, output_schema=Research)
-    research.add_sequence([embed_query, retrieve_evidence, rerank_evidence, expand_evidence])
+    research.add_sequence([
+        timed_node(n) for n in (embed_query, retrieve_evidence, rerank_evidence, expand_evidence)
+    ])
     research.add_edge(START, "embed_query")
 
     graph = StateGraph(QueryState, context_schema=Deps)
@@ -546,7 +551,7 @@ def build_graph():
         rewrite_followup, analyse, plan, collect, generate, shorten, verify, repair, review,
         finalise, abstain,
     ):
-        graph.add_node(node)
+        graph.add_node(timed_node(node))
     graph.add_node("research", research.compile())
 
     def route(source: str, decide: Callable[[QueryState], bool], yes: str, no: str) -> None:
@@ -562,13 +567,15 @@ def build_graph():
     )
     graph.add_edge("research", "collect")
     graph.add_conditional_edges("collect", _after_collect, ["generate", "finalise", "abstain"])
-    # One shorter retry; a second overrun is verified as empty and abstains.
-    route("generate", lambda s: s.overran and not s.shortened, "shorten", "verify")
+    # One shorter retry; a second overrun is verified as empty and abstains. A follow-up
+    # round is best effort and gets one attempt: every retry waits out the minute budget.
+    route("generate", lambda s: s.overran and not s.shortened and s.round == 1,
+          "shorten", "verify")
     graph.add_edge("shorten", "generate")
     # One repair, only if something was rejected and something might be salvageable.
     route(
         "verify",
-        lambda s: not s.repair_attempted and bool(s.report.rejected)
+        lambda s: s.round == 1 and not s.repair_attempted and bool(s.report.rejected)
         and s.report.coverage < settings.coverage_answer_threshold,
         "repair", "review",
     )
@@ -594,19 +601,29 @@ def run_pipeline(
     started = time.perf_counter()
     initial = QueryState(question=question, history=list(history[-settings.followup_turns :]))
     final: dict[str, Any] = {}
-    for namespace, mode, chunk in GRAPH.stream(
-        initial,
-        context=Deps(session, client, embedder),
-        stream_mode=["custom", "values"],
-        subgraphs=True,  # progress from inside the searches too
-        config={"recursion_limit": 60},  # two rounds, each with its retries
-    ):
-        if mode == "custom":
-            if on_progress is not None:
-                on_progress(chunk)
-        elif not namespace:
-            final = chunk
-    state = QueryState(**final)
+    with observability.observe("question", as_type="agent", input={"question": question}) as trace:
+        for namespace, mode, chunk in GRAPH.stream(
+            initial,
+            context=Deps(session, client, embedder),
+            stream_mode=["custom", "values"],
+            subgraphs=True,  # progress from inside the searches too
+            config={
+                "recursion_limit": 60,  # two rounds, each with its retries
+                "callbacks": observability.graph_callbacks(),
+                "run_name": "answer_graph",
+            },
+        ):
+            if mode == "custom":
+                if on_progress is not None:
+                    on_progress(chunk)
+            elif not namespace:
+                final = chunk
+        state = QueryState(**final)
+        state.trace_id = observability.current_trace_id()
+        if trace is not None:
+            trace.update(output={"verdict": state.verdict, "summary": state.summary,
+                                 "claims": [c.text for c in state.claims],
+                                 "abstain_reason": state.abstain_reason})
     state.latency_ms = int((time.perf_counter() - started) * 1000)
     return state
 

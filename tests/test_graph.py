@@ -205,6 +205,13 @@ class TestReviewAndWrapUp:
         assert state.report.quotes_total == 2
         assert {u.citation_label for u in state.evidence} == {"Article 3", "Article 50"}
 
+    def test_a_follow_up_round_gets_one_attempt(self, searches, monkeypatch):
+        monkeypatch.setitem(UNITS, "What is a deep fake?", UNITS["deep fakes"])
+        model = Model([answer(GOOD), None], review=self.FOLLOW_UP)  # the follow-up overruns
+        state, steps = run(model)
+        assert steps.count("generating") == 2 and "retrying" not in steps
+        assert [c.text for c in state.claims] == ["claim outputs of"]
+
     def test_a_follow_up_that_finds_nothing_keeps_the_first_answer(self, searches):
         _, scores = searches
         scores["What is a deep fake?"] = 0.0

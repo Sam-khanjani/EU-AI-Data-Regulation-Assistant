@@ -224,6 +224,24 @@ def summarise(results: list[CaseResult]) -> dict[str, Any]:
     }
 
 
+def save_summary(summary: dict[str, Any]) -> None:
+    """Keep the summary in ``eval_run``, for the accuracy panel of the admin dashboard."""
+    try:
+        from euaia import observability
+        from euaia.config import settings
+        from euaia.db.models import EvalRun
+        from euaia.db.session import SessionLocal
+
+        with SessionLocal() as session:
+            session.add(EvalRun(
+                prompt_version=settings.prompt_version, cases=summary["cases"], summary=summary
+            ))
+            session.commit()
+        observability.flush()
+    except Exception as exc:  # noqa: BLE001
+        print(f"  could not save the summary: {exc}", file=sys.stderr)
+
+
 def format_report(results: list[CaseResult], summary: dict[str, Any]) -> str:
     lines = ["", "=" * 94, "EVALUATION", "=" * 94, ""]
     lines.append(
@@ -351,6 +369,7 @@ def main(argv: list[str] | None = None) -> int:
     results = run(args.base_url, cases, verbose=args.verbose, budget=args.budget)
     summary = summarise(results)
     print(format_report(results, summary))
+    save_summary(summary)
 
     if args.json:
         args.json.write_text(

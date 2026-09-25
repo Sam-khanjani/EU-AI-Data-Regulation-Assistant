@@ -1,0 +1,149 @@
+{% set k = kpis %}
+{% macro pct(value) %}{{ "%.0f%%"|format(value * 100) if value is not none else "–" }}{% endmacro %}
+
+<section class="kpis">
+  <div class="kpi"><span>Questions</span><strong>{{ k.questions }}</strong>
+    <small>{{ k.small_talk }} small talk or out of scope</small></div>
+  <div class="kpi"><span>Answered</span><strong>{{ pct(k.answer_rate) }}</strong>
+    <small>{{ k.partial }} partial</small></div>
+  <div class="kpi"><span>Quote accuracy</span><strong>{{ pct(k.quote_accuracy) }}</strong>
+    <small>quotes found word for word</small></div>
+  <div class="kpi"><span>Coverage</span><strong>{{ pct(k.coverage) }}</strong>
+    <small>statements kept after checking</small></div>
+  <div class="kpi"><span>Tokens / question</span><strong>{{ "{:,}".format(k.tokens_in) }}</strong>
+    <small>in &middot; {{ "{:,}".format(k.tokens_out) }} out</small></div>
+  <div class="kpi"><span>Latency p50 / p95</span>
+    <strong>{{ "%.1f"|format(k.latency_p50 / 1000) }}s</strong>
+    <small>p95 {{ "%.1f"|format(k.latency_p95 / 1000) }}s &middot;
+      waiting {{ "%.1f"|format(k.wait_mean / 1000) }}s</small></div>
+  <div class="kpi"><span>Second round</span><strong>{{ pct(k.second_round) }}</strong>
+    <small>of reviewed answers</small></div>
+  <div class="kpi"><span>Repaired</span><strong>{{ k.repaired }}</strong>
+    <small>answers re-asked for exact quotes</small></div>
+</section>
+
+<section>
+  <h3>Free-tier quotas today</h3>
+  {% for q in quotas %}
+  <div class="quota">
+    <span>{{ q.name }}</span>
+    <div class="bar"><div class="{{ 'bad' if q.share > 0.85 else 'warn' if q.share > 0.6 else '' }}"
+         style="width: {{ (q.share * 100)|round(1) }}%"></div></div>
+    <span class="num">{{ "{:,}".format(q.used) }} / {{ "{:,}".format(q.limit) }}</span>
+  </div>
+  {% else %}
+  <p class="muted">Nothing spent yet today.</p>
+  {% endfor %}
+</section>
+
+<section class="charts">
+  <div><h3>Questions by outcome</h3><canvas id="c-verdicts"></canvas></div>
+  <div><h3>Tokens per day</h3><canvas id="c-tokens"></canvas></div>
+  <div><h3>Answer quality</h3><canvas id="c-quality"></canvas></div>
+  <div><h3>Latency (seconds)</h3><canvas id="c-latency"></canvas></div>
+  <div><h3>Mean time per step (ms)</h3><canvas id="c-steps"></canvas></div>
+  <div>
+    <h3>By kind of question</h3>
+    <table class="corpus">
+      <thead><tr><th>Intent</th><th class="num">Asked</th><th>Outcome</th>
+        <th class="num">Rounds</th><th class="num">Median s</th></tr></thead>
+      <tbody>
+      {% for i in intents %}
+        <tr><td>{{ i.intent }}</td><td class="num">{{ i.count }}</td>
+          <td class="small">{% for v, n in i.verdicts.items() %}{{ v }} {{ n }}{{ ", " if not loop.last }}{% endfor %}</td>
+          <td class="num">{{ i.rounds }}</td><td class="num">{{ i.latency or "–" }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3>Accuracy against the evaluation set</h3>
+  {% if evals %}
+  <table class="corpus">
+    <thead><tr><th>Run</th><th>Prompt</th><th class="num">Cases</th>
+      <th class="num">Citation recall</th><th class="num">Right to answer / refuse</th>
+      <th class="num">Quote accuracy</th><th>Correct refusals</th><th>False answers</th>
+      <th class="num">p95 s</th></tr></thead>
+    <tbody>
+    {% for e in evals %}
+      <tr><td>{{ e.ran_at.strftime("%Y-%m-%d %H:%M") }}</td><td>{{ e.prompt_version }}</td>
+        <td class="num">{{ e.cases }}</td>
+        <td class="num">{{ pct(e.citation_recall) }}</td>
+        <td class="num">{{ pct(e.abstention_accuracy) }}</td>
+        <td class="num">{{ pct(e.quote_accuracy) }}</td>
+        <td>{{ e.correct_refusals }}</td>
+        <td class="small">{{ e.false_answers|join(", ") or "none" }}</td>
+        <td class="num">{{ "%.0f"|format((e.latency_p95_ms or 0) / 1000) }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No evaluation run yet: <code>uv run python -m eval.harness</code> records one here.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h3>Recent questions</h3>
+  <table class="corpus recent">
+    <thead><tr><th>When</th><th>Question</th><th>Intent</th><th>Outcome</th>
+      <th class="num">Rounds</th><th class="num">Quotes</th><th class="num">Tokens in / out</th>
+      <th class="num">Seconds</th><th>Path</th><th></th></tr></thead>
+    <tbody>
+    {% for r in recent %}
+      <tr>
+        <td class="small">{{ r.asked_at.strftime("%m-%d %H:%M") }}</td>
+        <td title="{{ r.question }}">{{ r.question|truncate(70) }}</td>
+        <td>{{ r.intent }}</td>
+        <td><span class="pill {{ 'good' if r.verdict == 'answered' else 'warn' if r.verdict == 'partial' else 'bad' }}">{{ r.verdict }}</span></td>
+        <td class="num">{{ r.rounds if r.rounds is not none else "–" }}</td>
+        <td class="num">{{ r.quotes }}</td>
+        <td class="num small">{{ r.tokens }}</td>
+        <td class="num">{{ "%.1f"|format(r.latency) }}{% if r.waited %}<div class="muted small">waited {{ "%.0f"|format(r.waited) }}</div>{% endif %}</td>
+        <td class="small muted">{{ r.path }}</td>
+        <td>{% if r.trace_url %}<a href="{{ r.trace_url }}" target="_blank" rel="noopener">trace</a>{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="10" class="muted">No questions in this period.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if not langfuse %}
+  <p class="muted small">Tracing is off: set <code>LANGFUSE_ENABLED=true</code> to link each
+    question to its Langfuse trace.</p>
+  {% endif %}
+</section>
+
+<script>
+(() => {
+  const d = {{ daily|tojson }};
+  const steps = {{ steps|tojson }};
+  const charts = (window.euaiaCharts ||= {});
+  const palette = ["#1c4ed8", "#93b4f5", "#0f7a4d", "#8fd1b0", "#8a6a1f", "#e8c77a"];
+  const base = { animation: false, maintainAspectRatio: false, plugins: { legend: { labels: { boxWidth: 12 } } } };
+  const draw = (id, config) => {
+    charts[id]?.destroy();
+    charts[id] = new Chart(document.getElementById(id), { ...config, options: { ...base, ...config.options } });
+  };
+  const stacked = { scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } } };
+  draw("c-verdicts", { type: "bar", options: stacked, data: { labels: d.labels, datasets: [
+    { label: "answered", data: d.verdicts.answered, backgroundColor: "#0f7a4d" },
+    { label: "partial", data: d.verdicts.partial, backgroundColor: "#e8c77a" },
+    { label: "abstained", data: d.verdicts.abstained, backgroundColor: "#d98b8b" },
+  ] } });
+  draw("c-tokens", { type: "bar", options: stacked, data: { labels: d.labels,
+    datasets: Object.entries(d.tokens).map(([label, data], i) => ({ label, data, backgroundColor: palette[i % palette.length] })) } });
+  draw("c-quality", { type: "line", options: { scales: { y: { min: 0, max: 1 } } }, data: { labels: d.labels, datasets: [
+    { label: "quote accuracy", data: d.quote_accuracy, borderColor: "#1c4ed8", spanGaps: true },
+    { label: "coverage", data: d.coverage, borderColor: "#0f7a4d", spanGaps: true },
+  ] } });
+  draw("c-latency", { type: "line", options: { scales: { y: { beginAtZero: true } } }, data: { labels: d.labels, datasets: [
+    { label: "p50", data: d.latency_p50, borderColor: "#1c4ed8", spanGaps: true },
+    { label: "p95", data: d.latency_p95, borderColor: "#a52020", spanGaps: true },
+    { label: "waiting for quota", data: d.waiting, borderColor: "#8a6a1f", borderDash: [4, 4], spanGaps: true },
+  ] } });
+  draw("c-steps", { type: "bar", options: { indexAxis: "y", plugins: { legend: { display: false } } }, data: {
+    labels: steps.map(s => s.node), datasets: [{ data: steps.map(s => s.ms), backgroundColor: "#93b4f5" }] } });
+})();
+</script>

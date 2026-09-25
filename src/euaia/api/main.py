@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
-from euaia.api import service
+from euaia.api import monitoring, service
 from euaia.config import settings
 from euaia.db.session import DatabaseUnavailable, db_session
 from euaia.ingest.pipeline import check_all
@@ -139,6 +139,28 @@ def status_check(request: Request, session: Db):
         name="partials/corpus_status.html",
         context={"sources": service.corpus_status(session), "check_error": error},
     )
+
+
+@app.get("/monitor", response_class=HTMLResponse, dependencies=[Admin])
+def monitor(request: Request, days: int = 7):
+    """How the assistant is doing: tokens, quality, latency, quotas. Requires admin auth."""
+    return templates.TemplateResponse(
+        request=request, name="monitor.html", context={"days": _period(days)}
+    )
+
+
+@app.get("/monitor/stats", response_class=HTMLResponse, dependencies=[Admin])
+def monitor_stats(request: Request, session: Db, days: int = 7):
+    """HTMX endpoint: the Monitor page's panels, re-rendered every few seconds."""
+    return templates.TemplateResponse(
+        request=request,
+        name="partials/monitor_stats.html",
+        context=monitoring.dashboard(session, _period(days)),
+    )
+
+
+def _period(days: int) -> int:
+    return days if days in (1, 7, 30) else 7
 
 
 @app.get("/healthz")

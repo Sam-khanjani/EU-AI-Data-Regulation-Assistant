@@ -72,3 +72,30 @@ table.corpus .num { text-align: right; }
 
 footer { border-top: 1px solid var(--line); padding-block: 18px 40px; }
 footer p { color: var(--muted); font-size: 13px; margin: 0; }
+
+/* --- monitor --- */
+.wrap.wide { max-width: 1180px; }
+.monitor-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+.period a { margin-left: 6px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 999px;
+  color: var(--muted); text-decoration: none; font-size: 14px; }
+.period a.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-block: 18px 26px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.kpi span { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.kpi strong { display: block; font-size: 24px; margin-top: 2px; }
+.kpi small { color: var(--muted); font-size: 12px; }
+.quota { display: grid; grid-template-columns: 240px 1fr 150px; gap: 12px; align-items: center; margin: 6px 0; font-size: 14px; }
+.quota .bar { background: var(--line); border-radius: 999px; height: 10px; overflow: hidden; }
+.quota .bar div { background: var(--good); height: 100%; }
+.quota .bar div.warn { background: #d9a93a; }
+.quota .bar div.bad { background: var(--bad); }
+.quota .num { text-align: right; color: var(--muted); }
+.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 18px 26px; margin-top: 26px; }
+.charts canvas { height: 220px !important; }
+table.recent td { font-size: 13px; }
+@media (max-width: 640px) {
+  .monitor-head { flex-direction: column; }
+  .quota { grid-template-columns: 1fr; gap: 4px; }
+  .charts { grid-template-columns: 1fr; }
+  table.corpus { display: block; overflow-x: auto; }
+}

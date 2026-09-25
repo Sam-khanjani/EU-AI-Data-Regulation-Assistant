@@ -321,3 +321,18 @@ class QueryLog(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     model: Mapped[str | None] = mapped_column(String(64))
     prompt_version: Mapped[str | None] = mapped_column(String(32))
+    run: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    """How the answer was produced, for monitoring: the graph path with each node's time,
+    tokens per model, rounds, rate-limit waiting, and the Langfuse trace id."""
+
+
+class EvalRun(Base):
+    """One run of the evaluation suite: accuracy measured against known answers."""
+
+    __tablename__ = "eval_run"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    ran_at: Mapped[dt.datetime] = _now_col()
+    prompt_version: Mapped[str | None] = mapped_column(String(32))
+    cases: Mapped[int] = mapped_column(Integer, nullable=False)
+    summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

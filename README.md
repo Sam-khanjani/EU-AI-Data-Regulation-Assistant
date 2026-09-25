@@ -147,7 +147,8 @@ graph TD;
 | Reranking | NVIDIA `llama-nemotron-rerank-vl-1b-v2` via OpenRouter, or `BAAI/bge-reranker-v2-m3` run locally (set in `config.py`) |
 | Orchestration | LangGraph |
 | Chat | Chainlit, with sign-in and saved conversations |
-| Admin / API | FastAPI + Jinja2 + HTMX |
+| Admin / API | FastAPI + Jinja2 + HTMX, with a Monitor page (Chart.js) |
+| Monitoring | Langfuse, self-hosted in Docker: a trace per question, tokens per call, quality scores |
 
 Both providers are used on free tiers, which are tight enough to shape the design directly —
 chunking, caching, and prompt sizing are all built to fit inside them. Details on that, and on
@@ -271,6 +272,48 @@ Notes:
   PyPI's torch pulls the full CUDA stack; `pyproject.toml` routes it to the CPU wheel index
   instead, keeping several GB of unused GPU libraries out of the image.
 - Everything is published on `127.0.0.1` only. Nothing is reachable from other machines.
+
+## Monitoring
+
+Two views of how the assistant is doing, both local:
+
+- **The admin dashboard's Monitor page** (<http://127.0.0.1:8000/monitor>) shows the
+  numbers over time. It covers:
+  - answer rate and quote accuracy
+  - coverage and tokens per question
+  - latency, split from time spent waiting for rate limits
+  - how often the review asks for a second round
+  - mean time per graph step
+  - today's free-tier quotas
+  - accuracy from each evaluation run
+  - the last 25 questions with the path each took through the graph
+
+  It reads the `query_log` row every question writes, so it works with tracing off. It
+  refreshes every 15 seconds.
+- **Langfuse** (<http://127.0.0.1:3000>) takes one question apart. Each question is a trace,
+  recorded through Langfuse's official LangGraph integration (its LangChain
+  `CallbackHandler`). The trace holds every graph node, subgraph and parallel search with its
+  state, and every model call as a generation with its prompt, answer, input and output
+  tokens. Large state (the query embedding, passage texts) is trimmed before sending. Verdict, quote accuracy, coverage, rounds and
+  latency are attached as scores. Each row on the Monitor page links to its trace.
+
+Langfuse runs self-hosted in the same Docker Compose file, under the `monitoring` profile:
+six containers, including ClickHouse, so allow about 2–3 GB of memory. To turn it on, add
+`LANGFUSE_ENABLED=true` to `.env`, then:
+
+```bash
+docker compose --profile monitoring up -d --build
+```
+
+Sign in to Langfuse as `admin@euaia.local` / `euaia-local-admin`. That account, the project
+and its API keys are created on first start, so no setup clicks are needed. These are
+local-only defaults: override `LANGFUSE_*` in `.env` before running it anywhere but your
+laptop. Without `LANGFUSE_ENABLED=true` nothing is sent, and a Langfuse that is down never
+affects an answer.
+
+Accuracy against known answers comes from the evaluation suite:
+`uv run python -m eval.harness` records each run's citation recall, correct refusals and
+quote accuracy for the Monitor page.
 
 ## Chat sign-in
 
@@ -475,6 +518,7 @@ src/euaia/
   ingest/     CELLAR client, PDF readers, chunker, embedder, pipeline
   retrieval/  hybrid dense + full-text + structural lookup, reranker
   graph/      the LangGraph answer graph: nodes and edges, state, prompts
+  observability.py   Langfuse tracing (off unless LANGFUSE_ENABLED=true)
   llm/        Groq client and structured-output schemas
   verify/     text normalisation and citation verification
   chat/       Chainlit chat: sign-in, saved conversations, how answers are shown

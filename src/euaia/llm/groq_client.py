@@ -43,6 +43,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from euaia import observability
 from euaia.config import settings
 from euaia.llm.ratelimit import Limits, estimate_tokens, limiter_for
 
@@ -82,6 +83,8 @@ class Usage:
     latency_ms: int = 0
     waited_ms: int = 0
     """Time spent parked by the rate limiter, not by the API."""
+    by_model: dict[str, tuple[int, int, int]] = field(default_factory=dict)
+    """Input tokens, output tokens and calls per model: Groq's limits are per model."""
 
     def add(self, other: Usage) -> None:
         self.prompt_tokens += other.prompt_tokens
@@ -89,6 +92,9 @@ class Usage:
         self.calls += other.calls
         self.latency_ms += other.latency_ms
         self.waited_ms += other.waited_ms
+        for model, counts in other.by_model.items():
+            mine = self.by_model.get(model, (0, 0, 0))
+            self.by_model[model] = tuple(a + b for a, b in zip(mine, counts, strict=True))
 
     @property
     def total_tokens(self) -> int:
@@ -168,6 +174,31 @@ class GroqClient:
         estimate = prompt_tokens + max_completion_tokens
         waited = limiter.acquire(estimate)
 
+        # One generation in the trace per call, named for what it is for: query_analysis,
+        # grounded_answer, answer_review...
+        with observability.observe(
+            response_format["json_schema"]["name"], as_type="generation", model=chosen,
+            input=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            model_parameters={"max_completion_tokens": max_completion_tokens,
+                              "reasoning_effort": reasoning_effort or "default"},
+            metadata={"waited_s": round(waited, 1)},
+        ) as generation:
+            completion = self._complete(
+                chosen, system, user, response_format, max_completion_tokens, temperature,
+                reasoning_effort, limiter, estimate, waited,
+            )
+            if generation is not None:
+                usage = completion.usage
+                generation.update(
+                    output=completion.data,
+                    usage_details={"input": usage.prompt_tokens, "output": usage.completion_tokens},
+                )
+        return completion
+
+    def _complete(
+        self, chosen, system, user, response_format, max_completion_tokens, temperature,
+        reasoning_effort, limiter, estimate, waited,
+    ) -> Completion:
         started = time.perf_counter()
         response = self._create(
             model=chosen,
@@ -204,6 +235,7 @@ class GroqClient:
         if response.usage is not None:
             usage.prompt_tokens = response.usage.prompt_tokens or 0
             usage.completion_tokens = response.usage.completion_tokens or 0
+        usage.by_model = {chosen: (usage.prompt_tokens, usage.completion_tokens, 1)}
 
         # Correct the optimistic reservation with what the call actually cost.
         limiter.record(estimate, usage.total_tokens)

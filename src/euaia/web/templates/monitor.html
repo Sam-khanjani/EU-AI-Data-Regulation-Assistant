@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Monitor &mdash; EU AI Act Assistant{% endblock %}
+{% block main_class %}wide{% endblock %}
+
+{% block content %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+<div class="monitor-head">
+  <div>
+    <h1>Monitor</h1>
+    <p class="muted">
+      How the assistant is answering: tokens, answer quality, speed and free-tier quotas, from
+      the audit row every question writes. Refreshes every 15 seconds.
+    </p>
+  </div>
+  <nav class="period">
+    {% for d, label in [(1, "Today"), (7, "7 days"), (30, "30 days")] %}
+      <a href="/monitor?days={{ d }}" class="{{ 'on' if d == days }}">{{ label }}</a>
+    {% endfor %}
+  </nav>
+</div>
+
+<div hx-get="/monitor/stats?days={{ days }}" hx-trigger="load, every 15s" hx-swap="innerHTML">
+  <p class="muted">Loading&hellip;</p>
+</div>
+{% endblock %}

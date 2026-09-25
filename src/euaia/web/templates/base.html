@@ -16,12 +16,13 @@
       </a>
       <nav>
         <a href="/status">Corpus</a>
+        <a href="/monitor">Monitor</a>
         <a href="{{ chat_url }}">Open the chat</a>
       </nav>
     </div>
   </header>
 
-  <main class="wrap">
+  <main class="wrap {% block main_class %}{% endblock %}">
     {% block content %}{% endblock %}
   </main>
 

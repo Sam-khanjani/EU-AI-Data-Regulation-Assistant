@@ -39,7 +39,7 @@ class Turn(NamedTuple):
 
 
 def _total(spent: Usage, more: Usage) -> Usage:
-    total = replace(spent)
+    total = replace(spent, by_model=dict(spent.by_model))
     total.add(more)
     return total
 
@@ -74,6 +74,7 @@ class Research:
     found: Annotated[list[Finding], operator.add] = field(default_factory=list)
     usage: Annotated[Usage, _total] = field(default_factory=Usage)
     progress: Annotated[list[Progress], operator.add] = field(default_factory=list)
+    timings: Annotated[list[tuple[str, int]], operator.add] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -162,7 +163,11 @@ class QueryState:
     # bookkeeping
     usage: Annotated[Usage, _total] = field(default_factory=Usage)
     progress: Annotated[list[Progress], operator.add] = field(default_factory=list)
+    timings: Annotated[list[tuple[str, int]], operator.add] = field(default_factory=list)
+    """Every node run, in order, with its milliseconds: the path the question took."""
     latency_ms: int = 0
+    trace_id: str | None = None
+    """The question's Langfuse trace, when tracing is on."""
 
     @property
     def document_version_ids(self) -> list[int]:

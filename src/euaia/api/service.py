@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from euaia import observability
 from euaia.config import settings
 from euaia.db.models import CheckRun, Chunk, DocumentVersion, QueryLog, Source
 from euaia.graph.nodes import run_pipeline
@@ -95,8 +96,49 @@ def ask(
 
     state = run_pipeline(question, session, client, embedder, history, on_progress)
     view = _to_view(state)
-    view.query_log_id = _log(session, state, view)
+    run = run_record(state, view)
+    view.query_log_id = _log(session, state, view, run)
+    observability.score(state.trace_id, _scores(view, run))
     return view
+
+
+def run_record(state: QueryState, view: AnswerView) -> dict[str, Any]:
+    """How the answer was produced, stored on its audit row for the monitoring page."""
+    nodes = [name for name, _ in state.timings]
+    basis: dict[str, int] = {}
+    for claim in view.claims:
+        basis[claim.basis] = basis.get(claim.basis, 0) + 1
+    return {
+        "trace_id": state.trace_id,
+        "steps": [{"node": name, "ms": ms} for name, ms in state.timings],
+        "rounds": nodes.count("plan"),
+        "searches": nodes.count("rerank_evidence"),
+        "repaired": nodes.count("repair"),
+        "shortened": nodes.count("shorten"),
+        "tokens": {
+            model: {"input": i, "output": o, "calls": calls}
+            for model, (i, o, calls) in state.usage.by_model.items()
+        },
+        "waited_ms": state.usage.waited_ms,
+        "evidence": len(state.evidence),
+        "claims": len(view.claims),
+        "criteria": len(view.criteria),
+        "basis": basis,
+    }
+
+
+def _scores(view: AnswerView, run: dict[str, Any]) -> dict[str, float | str]:
+    """The answer's quality, as Langfuse scores on its trace."""
+    scores: dict[str, float | str] = {
+        "verdict": view.verdict,
+        "rounds": run["rounds"],
+        "latency_s": round(view.latency_ms / 1000, 1),
+        "rate_limit_wait_s": round(view.waited_ms / 1000, 1),
+    }
+    if view.quotes_total:
+        scores["quote_accuracy"] = (view.quotes_total - view.quotes_dropped) / view.quotes_total
+        scores["coverage"] = view.coverage
+    return scores
 
 
 def answer_payload(view: AnswerView) -> dict[str, Any]:
@@ -215,7 +257,9 @@ def _citation(quote: VerifiedQuote, versions: dict[int, str]) -> Citation:
     )
 
 
-def _log(session: Session, state: QueryState, view: AnswerView) -> int | None:
+def _log(
+    session: Session, state: QueryState, view: AnswerView, run: dict[str, Any] | None = None
+) -> int | None:
     """Write the audit row. A logging failure must never sink a good answer."""
     try:
         row = QueryLog(
@@ -243,6 +287,7 @@ def _log(session: Session, state: QueryState, view: AnswerView) -> int | None:
             latency_ms=state.latency_ms,
             model=settings.groq_model,
             prompt_version=settings.prompt_version,
+            run=run,
         )
         session.add(row)
         session.commit()

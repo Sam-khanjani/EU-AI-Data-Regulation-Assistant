@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from euaia.config import settings
 from euaia.db.session import engine
-from eval.harness import Case, evaluate_response, load_cases, run, summarise
+from eval.harness import Case, evaluate_response, load_cases, run, save_summary, summarise
 
 # --------------------------------------------------------------- scoring logic
 
@@ -186,7 +186,9 @@ class TestLiveEvaluation:
     @pytest.fixture(scope="class")
     @classmethod
     def results(cls):
-        return run(None, load_cases())
+        results = run(None, load_cases())
+        save_summary(summarise(results))
+        return results
 
     def test_no_case_errored(self, results):
         errors = [(r.case.id, r.error) for r in results if r.error]

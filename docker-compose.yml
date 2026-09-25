@@ -10,6 +10,10 @@ x-app-env: &app-env
   # 127.0.0.1:5433 -- the host-side port mapping, which a container cannot reach -- so it is
   # overridden here. POSTGRES_PASSWORD must be URL-safe (or percent-encoded) to embed.
   DATABASE_URL: postgresql+psycopg://euaia:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/euaia
+  # Tracing to Langfuse inside the compose network: set LANGFUSE_ENABLED=true in .env and
+  # start it with `docker compose --profile monitoring up -d`.
+  LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+  LANGFUSE_HOST: http://langfuse-web:3000
 
 x-app: &app
   build:
@@ -136,7 +140,134 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # ---------------------------------------------------------------- Langfuse (tracing)
+  # On demand only (`--profile monitoring`): Langfuse's self-hosted stack, trimmed from its
+  # official docker-compose.yml. The UI is on http://127.0.0.1:3000; everything else is
+  # reachable only inside this network. For a laptop: the defaults below are local-only
+  # secrets -- change them before exposing this anywhere. The app sends traces here when
+  # LANGFUSE_ENABLED=true (see "Monitoring" in README.md).
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    depends_on: &langfuse-deps
+      langfuse-db:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      <<: &langfuse-env
+        DATABASE_URL: postgresql://postgres:postgres@langfuse-db:5432/postgres
+        NEXTAUTH_URL: http://localhost:3000
+        SALT: ${LANGFUSE_SALT:-euaia-local-salt}
+        ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+        TELEMETRY_ENABLED: "false"
+        CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+        CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+        CLICKHOUSE_USER: clickhouse
+        CLICKHOUSE_PASSWORD: clickhouse
+        CLICKHOUSE_CLUSTER_ENABLED: "false"
+        REDIS_HOST: langfuse-redis
+        REDIS_PORT: "6379"
+        REDIS_AUTH: myredissecret
+        LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+        LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+        LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+        LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+        LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+        LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+        LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-euaia-local-secret}
+      # Created on first start, so the app can send traces with no clicking through a UI.
+      # The keys match the defaults in config.py.
+      LANGFUSE_INIT_ORG_ID: euaia
+      LANGFUSE_INIT_ORG_NAME: EU AI Act Assistant
+      LANGFUSE_INIT_PROJECT_ID: euaia
+      LANGFUSE_INIT_PROJECT_NAME: euaia
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-euaia-local}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-euaia-local}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL:-admin@euaia.local}
+      LANGFUSE_INIT_USER_NAME: admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD:-euaia-local-admin}
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    depends_on: *langfuse-deps
+    environment: *langfuse-env
+
+  langfuse-db:
+    image: postgres:17
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - langfuse-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuse-clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  langfuse-redis:
+    image: redis:7
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command: --requirepass myredissecret --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "myredissecret", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  langfuse-minio:
+    image: cgr.dev/chainguard/minio
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    volumes:
+      - langfuse-minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+
 volumes:
   euaia-pgdata:
   euaia-models:
   euaia-raw:
+  langfuse-pgdata:
+  langfuse-clickhouse:
+  langfuse-minio:
