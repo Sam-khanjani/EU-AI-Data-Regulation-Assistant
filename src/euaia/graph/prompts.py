@@ -32,6 +32,9 @@ surveillance; penalties; and the timetable for entry into application.
 Choose exactly one intent:
 
 - "lookup": asks what the Regulation says. ("Which AI practices are prohibited?")
+- "overview": asks for everything in a group that spans several provisions -- all the
+  requirements for high-risk AI systems, all the commitments of a code of practice, all the
+  obligations of a role. ("What are all the requirements for high-risk AI systems?")
 - "applicability": asks whether rules apply to the user's own system or situation.
   ("Is my CV-screening tool high-risk?")
 - "comparison": asks how provisions, obligations, or versions differ.
@@ -48,6 +51,16 @@ For "greeting" only, write "reply": one short, warm sentence answering the socia
 the user's language ("I'm doing well, thanks for asking!", "You're welcome!", "Hello!").
 Never answer a question, give information, or describe what you can help with -- the
 application adds that sentence itself. For every other intent, "reply" is an empty string.
+
+For "applicability" only, "legal_test" names the test that decides it: "high_risk"
+(classification as high-risk), "prohibited" (prohibited practices), "transparency" (duties
+to tell people about AI), "scope" (whether the Act applies at all, e.g. outside the EU or
+for research), "gpai" (general-purpose AI models), or "definition" (whether something is an
+AI system, or who is a provider or deployer). Otherwise "none".
+
+For "comparison" only, "sides" lists each thing compared as a short search phrase in the
+Regulation's vocabulary: ["chatbot disclosure obligation", "deep fake labelling
+obligation"]. Otherwise an empty list.
 
 BE RELUCTANT TO SAY "out_of_scope"
 
@@ -128,6 +141,10 @@ f. When the evidence includes a unit's parts (a commitment and its measures), co
    part. Parts listed in an "outline" block were not read in full: name them, and list
    them in unanswered_aspects rather than describing what they contain. A user asking for
    a code's "measurements" means its Measures, not quantities.
+g. When the question compares things, give each side its own claims, then say plainly how
+   they differ.
+h. When the question asks for everything in a group and the evidence has an outline, the
+   first claim names every part the outline lists, quoting the outline's lines.
 
 HOW YOUR ANSWER IS PROCESSED
 
@@ -203,6 +220,68 @@ all. Write the answer again. For each claim, find the passage in the evidence an
 character for character. If no evidence block supports a claim, drop that claim rather than
 adjusting the quote to fit.
 """
+
+
+PART_NOTE = """
+
+This question is one part of a larger answer. If the evidence answers only some of it,
+answer that and list the rest in unanswered_aspects, rather than setting answerable to
+false."""
+
+REVIEW_SYSTEM = """\
+You check whether an answer about the EU AI Act covers the user's question before it is
+shown. You see the question and the verified answer so far, not the documents.
+
+Say "complete": true unless BOTH hold:
+1. an essential part of the question is unanswered -- a side of a comparison is missing,
+   or the answer depends on a term, provision or condition that it does not explain; and
+2. another search of the AI Act, the Commission's guidelines, codes of practice or Q&A
+   could answer it.
+
+Never ask about other laws, predictions, enforcement cases, facts about the user's own
+system, or more detail on something already answered. An answer that names every part of
+a list and explains some of them is complete: do not ask for the rest in detail. "Not
+covered" lines are not missing parts in themselves; ask only when the question cannot be
+answered without one.
+
+When "complete" is false:
+- "kind": "comparison" if what is missing is how two or more things differ; list each in
+  "sides" as a search phrase in the Regulation's vocabulary, and write "question" as one
+  standalone comparison question.
+- "kind": "lookup" otherwise, with "question" one standalone question for only the
+  missing part, and "sides" empty.
+When "complete" is true: "kind" "none", "question" empty, "sides" empty.
+"""
+
+WRAPUP_SYSTEM = """\
+You write the opening of an answer about the EU AI Act that was assembled in parts. Every
+statement in the parts below has been checked word for word against the source text.
+
+"summary": three to five sentences answering the user's question directly and drawing the
+parts together -- how they relate and, for a comparison, how the sides differ. Use only
+what the parts state; add nothing. Keep exactly the parts' distinction between what the
+Act requires and what guidance explains or a voluntary code commits signatories to.
+
+"unanswered_aspects": what the parts together still leave unanswered. Leave out anything
+some part answers.
+
+Never state or imply whether the user's own system is, or is not, high-risk, prohibited,
+exempt or covered: that depends on facts only the user has. Say what it depends on.
+"""
+
+
+def answer_so_far(rounds) -> str:
+    """The verified answer, part by part, as the review and the wrap-up read it."""
+    blocks = []
+    for number, part in enumerate(rounds, start=1):
+        outcome = part.outcome
+        lines = [f"PART {number}: {part.question}", outcome.get("summary", "")]
+        lines += [f"- {c['criterion']}: {c['explanation']}" for c in outcome.get("criteria", [])]
+        if part.intent != "applicability" and part.report is not None:
+            lines += [f"- {claim.text}" for claim in part.report.claims]
+        lines += [f"Not covered: {a}" for a in outcome.get("unanswered_aspects", [])]
+        blocks.append("\n".join(line for line in lines if line))
+    return "\n\n".join(blocks)
 
 
 AUTHORITY_TAG = {

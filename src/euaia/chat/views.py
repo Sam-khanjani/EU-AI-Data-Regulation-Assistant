@@ -36,6 +36,9 @@ STEP_LABELS = {
     "retrying": "Shortening the draft",
     "verifying": "Checking every quote against the source",
     "repairing": "Asking for exact quotes",
+    "reviewing": "Checking the answer covers the question",
+    "extending": "Looking into",
+    "wrapping_up": "Bringing the parts together",
     "abstaining": "Stopping without an answer",
     "done": "Finished",
 }
@@ -146,8 +149,7 @@ def answer_markdown(view: AnswerView) -> str:
             head = f"**{number}. {criterion['criterion']}** · {status}"
             body = _with_citations(criterion["explanation"], criterion["citations"])
             parts.append(f"{head}  \n{body}")
-    else:
-        parts.extend(_grouped_claims(view.claims))
+    parts.extend(_grouped_claims(view.claims))
 
     if view.claims and all(claim.basis == "code" for claim in view.claims):
         parts.append(CODE_ONLY_NOTE)

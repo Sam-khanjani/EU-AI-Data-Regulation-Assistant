@@ -179,15 +179,14 @@ def _to_view(state: QueryState) -> AnswerView:
         view.quotes_total = report.quotes_total
         view.quotes_dropped = report.quotes_dropped
         view.claims_dropped = len(report.dropped_claims)
-        if state.intent != "applicability":
-            view.claims = [
-                AnswerClaim(
-                    text=claim.text,
-                    citations=[_citation(q, versions) for q in claim.quotes],
-                    basis=claim.basis,
-                )
-                for claim in report.claims
-            ]
+    view.claims = [
+        AnswerClaim(
+            text=claim.text,
+            citations=[_citation(q, versions) for q in claim.quotes],
+            basis=claim.basis,
+        )
+        for claim in state.claims
+    ]
     return view
 
 
@@ -232,14 +231,14 @@ def _log(session: Session, state: QueryState, view: AnswerView) -> int | None:
                     "deeplink": c.deeplink,
                     "method": c.method,
                 }
-                for claim in view.claims
-                for c in claim.citations
+                for c in [q for claim in view.claims for q in claim.citations]
+                + [q for criterion in view.criteria for q in criterion["citations"]]
             ],
             verdict=state.verdict,
             abstain_reason=state.abstain_reason,
             citation_coverage=view.coverage,
             quotes_total=view.quotes_total,
-            quotes_repaired=1 if state.repair_attempted else 0,
+            quotes_repaired=int(any(p.step == "repairing" for p in state.progress)),
             quotes_dropped=view.quotes_dropped,
             latency_ms=state.latency_ms,
             model=settings.groq_model,

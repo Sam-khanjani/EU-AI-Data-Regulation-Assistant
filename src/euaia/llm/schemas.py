@@ -21,7 +21,8 @@ from __future__ import annotations
 
 from typing import Any
 
-INTENTS = ("lookup", "applicability", "comparison", "out_of_scope", "greeting")
+INTENTS = ("lookup", "overview", "applicability", "comparison", "out_of_scope", "greeting")
+LEGAL_TESTS = ("high_risk", "prohibited", "transparency", "scope", "gpai", "definition", "none")
 
 
 def _schema(name: str, schema: dict[str, Any]) -> dict[str, Any]:
@@ -46,6 +47,8 @@ QUERY_ANALYSIS_SCHEMA = _schema(
             "referenced_articles",
             "referenced_annexes",
             "reply",
+            "legal_test",
+            "sides",
         ],
         "properties": {
             "intent": {
@@ -53,6 +56,8 @@ QUERY_ANALYSIS_SCHEMA = _schema(
                 "enum": list(INTENTS),
                 "description": (
                     "lookup: asks what a provision says. "
+                    "overview: asks for everything in a group, e.g. all requirements of a "
+                    "chapter or all commitments of a code. "
                     "applicability: asks whether rules apply to the user's own system. "
                     "comparison: asks how provisions or versions differ. "
                     "out_of_scope: not answerable from the EU AI Act corpus. "
@@ -88,6 +93,56 @@ QUERY_ANALYSIS_SCHEMA = _schema(
                 "items": {"type": "string"},
                 "description": "Annex numbers named explicitly, e.g. ['III'].",
             },
+            "legal_test": {
+                "type": "string",
+                "enum": list(LEGAL_TESTS),
+                "description": "For applicability only: the test that decides it. Else none.",
+            },
+            "sides": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "For comparison only: each thing compared, as a search phrase. Else empty."
+                ),
+            },
+        },
+    },
+)
+
+
+# --------------------------------------------------------------------- review
+
+REVIEW_SCHEMA = _schema(
+    "answer_review",
+    {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["complete", "kind", "question", "sides"],
+        "properties": {
+            "complete": {"type": "boolean"},
+            "kind": {"type": "string", "enum": ["none", "lookup", "comparison"]},
+            "question": {
+                "type": "string",
+                "description": "The follow-up question for the missing part. Else empty.",
+            },
+            "sides": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "For comparison: each thing compared, as a search phrase.",
+            },
+        },
+    },
+)
+
+WRAPUP_SCHEMA = _schema(
+    "answer_wrap_up",
+    {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["summary", "unanswered_aspects"],
+        "properties": {
+            "summary": {"type": "string"},
+            "unanswered_aspects": {"type": "array", "items": {"type": "string"}},
         },
     },
 )

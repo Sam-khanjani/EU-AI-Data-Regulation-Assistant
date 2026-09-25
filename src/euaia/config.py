@@ -163,6 +163,9 @@ class Settings(BaseSettings):
     max_claims: int = 4
     # Fallback cap used when the model overruns and the response is rejected.
     max_claims_retry: int = 2
+    # Answer rounds per question: the question itself, plus one follow-up the review may ask
+    # for. Each round is a full answer call, so a second one waits out the minute budget.
+    max_rounds: int = 2
 
     # --- Answer gates ---
     # Fraction of claims that must carry a verified quote to answer outright.
@@ -186,7 +189,8 @@ class Settings(BaseSettings):
     # v2: fuller, plain-English answers, and follow-up questions rewritten to stand alone.
     # v3: authority tiers in the answer prompt; a greeting intent in the classifier.
     # v4: codes of practice -- context lines in evidence, measures named, parts covered.
-    prompt_version: str = "v4"
+    # v5: paths per question type (overview, comparison sides, legal tests), review, wrap-up.
+    prompt_version: str = "v5"
 
     # --- Chat interface (python -m euaia.chat) ---
     # Who may sign in: comma-separated name:password pairs, e.g. "alice:s3cret,bob:hunter2".

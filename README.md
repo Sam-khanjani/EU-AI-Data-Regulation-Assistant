@@ -103,23 +103,34 @@ shows the verified quote, clicking opens the provision on EUR-Lex. A follow-up s
 about providers?" is first rewritten into a standalone question, so retrieval and verification
 still work on one self-contained question. Conversations are saved per user.
 
-The answer pipeline is a LangGraph `StateGraph` ([`graph/nodes.py`](src/euaia/graph/nodes.py)).
-Every step is a node that returns only what it changed, and every decision is an edge
-(dotted below), so this diagram is the whole control flow. It is a labelled version of what
-`GRAPH.get_graph().draw_mermaid()` prints:
+The answer pipeline is a LangGraph `StateGraph`. Each kind of question takes its own path:
+a comparison searches each side in parallel, an applicability question adds the provisions
+of its legal test, an overview adds the outline of the whole group. After the answer is
+verified, a review can send one follow-up round for a missing part, and a final step brings
+the rounds together. Every decision is an edge (dotted below); the paths are explained in
+[`src/euaia/graph/README.md`](src/euaia/graph/README.md).
 
 ```mermaid
 graph TD;
-	__start__([start]) -.-> rewrite_followup & analyse
+	__start__([start]) -.->|follow-up| rewrite_followup
+	__start__ -.-> analyse
 	rewrite_followup --> analyse
 	analyse -.->|small talk, out of scope| abstain
-	analyse -.-> embed_query --> retrieve_evidence --> rerank_evidence --> expand_evidence
-	expand_evidence -.->|too little evidence| abstain
-	expand_evidence -.-> generate
+	analyse -.->|lookup, overview, applicability, comparison| plan
+	plan -.->|one search per side of a comparison, in parallel| research
+	subgraph research [research, once per search]
+		embed_query --> retrieve_evidence --> rerank_evidence --> expand_evidence
+	end
+	research --> collect
+	collect -.->|too little evidence| abstain
+	collect -.->|a follow-up found nothing| finalise
+	collect -.-> generate
 	generate -.->|overran the schema| shorten --> generate
 	generate -.-> verify
 	verify -.->|quotes rejected| repair --> generate
-	verify -.-> finalise
+	verify -.-> review
+	review -.->|a part of the question is missing| plan
+	review -.-> finalise
 	abstain --> __end__([end])
 	finalise --> __end__
 ```

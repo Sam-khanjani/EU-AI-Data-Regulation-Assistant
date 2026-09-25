@@ -478,6 +478,50 @@ def with_structure(
     return units + added
 
 
+def outline(session: Session, unit: RetrievedUnit) -> list[RetrievedUnit]:
+    """The heading of every part beside ``unit``: its article's section or chapter, its
+    commitment's code section, or its guideline section's parent.
+
+    For questions asking for everything in a group -- "all the requirements for high-risk
+    AI systems" is Articles 8 to 15 -- where the evidence budget holds a few parts in full but
+    the answer has to name all of them. One small block, verbatim, so it can be quoted.
+    """
+    parent = session.execute(
+        text(
+            """
+            SELECT parent.id, parent.unit_path, parent.unit_type, parent.unit_number,
+                   parent.heading, parent.eurlex_deeplink, parent.context
+            FROM structural_unit item JOIN structural_unit parent ON parent.id = item.parent_id
+            WHERE item.document_version_id = :version
+              AND (item.unit_path = :path OR :path LIKE item.unit_path || '/%')
+              AND (item.unit_path = :path OR item.unit_type IN ('article', 'annex')
+                   OR item.unit_number ~ '(^| )Commitment [0-9]+$')
+            ORDER BY length(item.unit_path)
+            LIMIT 1
+            """
+        ),
+        {"version": unit.document_version_id, "path": unit.unit_path},
+    ).mappings().first()
+    if parent is None:
+        return []
+    rows = session.execute(
+        text("SELECT heading, text FROM structural_unit WHERE parent_id = :id ORDER BY ordinal"),
+        {"id": parent["id"]},
+    ).all()
+    if len(rows) < 2:
+        return []
+    lines = []
+    for heading, body in rows:
+        # "Article 9" + its heading; a code's "Commitment 1: ..." line can wrap mid-heading.
+        first = body.split("\n", 1)[0]
+        if heading and heading not in first:
+            first = f"{first.split(':')[0]}: {heading}" if ":" in first else f"{first} {heading}"
+        lines.append(first)
+    context = f"outline of {parent['heading'] or parent['unit_path']}: every part's heading"
+    top = _from_row(unit, parent, "\n".join(lines), context)
+    return [replace(top, citation_label=f"{top.citation_label} (outline)")]
+
+
 def _from_row(base: RetrievedUnit, row, body: str, context: str | None) -> RetrievedUnit:
     """A unit of the same document as ``base``, read from a ``structural_unit`` row."""
     return replace(

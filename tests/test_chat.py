@@ -273,6 +273,7 @@ class TestTheGraph:
 
     def test_every_decision_is_an_edge_of_the_drawn_graph(self):
         drawn = nodes.GRAPH.get_graph().draw_mermaid()
-        for edge in ("analyse -.-> abstain", "generate -.-> shorten", "verify -.-> repair",
-                     "repair --> generate", "expand_evidence -.-> abstain"):
+        for edge in ("analyse -.-> abstain", "plan -.-> research", "collect -.-> abstain",
+                     "generate -.-> shorten", "verify -.-> repair", "repair --> generate",
+                     "review -.-> plan", "review -.-> finalise"):
             assert edge in drawn

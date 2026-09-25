@@ -1,18 +1,25 @@
-"""The answer pipeline, as a LangGraph ``StateGraph`` (drawn in the README).
+"""The answer pipeline, as a LangGraph ``StateGraph`` (drawn in ``graph/README.md``).
 
 Every node takes the state and the runtime context (:class:`Deps`) and returns only the
 fields it changed; every decision is an edge:
 
 * a follow-up is first rewritten to stand alone, so everything after it sees one question;
 * small talk and out-of-scope questions stop before anything is searched;
+* **plan** shapes the search to the kind of question: a comparison searches each side in
+  parallel (LangGraph ``Send``), an applicability question adds the provisions of the legal
+  test that decides it, an overview adds the outline of the whole group it asks about;
 * **sufficiency**, before generation: if nothing retrieved scores above the relevance
   threshold, we abstain without calling the answer model -- asking it to ground an answer in
   evidence that does not address the question is how systems produce confident nonsense;
 * a draft that overruns the response schema is asked for once more with fewer claims;
 * **repair**: rejected quotes are named back to the model once, and it is asked to quote
   again. We never adjust a quote on the model's behalf -- see ``euaia.verify.citations``;
-* **coverage**, in finalise: how much of what the model said survived checking decides
-  between answering, degrading to partial, and abstaining.
+* **coverage**: how much of what the model said survived checking decides between
+  answering, degrading to partial, and abstaining;
+* **review**: a small model reads the verified answer and may send one follow-up round --
+  a missing side of a comparison, or a term the answer depends on -- through the same
+  search, draft and verification; **finalise** then writes one summary over all the rounds.
+  Every claim shown is still a claim whose quotes were verified.
 
 Progress is streamed as each node starts (LangGraph's ``custom`` stream), so the chat shows
 the work live.
@@ -22,18 +29,28 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
+from langgraph.types import Send
 from sqlalchemy.orm import Session
 
 from euaia.config import settings
 from euaia.graph import prompts
-from euaia.graph.state import Progress, QueryState, Turn
+from euaia.graph.state import (
+    Finding,
+    Progress,
+    QueryState,
+    Research,
+    Round,
+    SearchTask,
+    Turn,
+)
 from euaia.ingest.embeddings import Embedder
 from euaia.llm.groq_client import GroqClient, SchemaValidationFailed
 from euaia.llm.ratelimit import Limits, estimate_tokens
@@ -42,6 +59,8 @@ from euaia.llm.schemas import (
     ASSESSMENT_SCHEMA,
     FOLLOWUP_SCHEMA,
     QUERY_ANALYSIS_SCHEMA,
+    REVIEW_SCHEMA,
+    WRAPUP_SCHEMA,
 )
 from euaia.retrieval.hybrid import (
     RetrievedUnit,
@@ -49,11 +68,13 @@ from euaia.retrieval.hybrid import (
     expand_to_units,
     fit_token_budget,
     label_units,
+    outline,
     retrieve,
+    structural_search,
     with_structure,
 )
 from euaia.retrieval.rerank import rerank
-from euaia.verify.citations import Evidence, decide_verdict, verify_answer
+from euaia.verify.citations import Evidence, VerificationReport, decide_verdict, verify_answer
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +101,18 @@ OVERRAN_REASON = (
 )
 _NO_SEARCH = ("out_of_scope", "greeting")
 
+LEGAL_TESTS = {
+    "high_risk": (["6"], ["III"]),
+    "prohibited": (["5"], []),
+    "transparency": (["50"], []),
+    "scope": (["2"], []),
+    "gpai": (["51", "53", "55"], []),
+    "definition": (["3"], []),
+}
+"""The provisions that set each test an applicability question turns on. Searched as if
+the user had named them, so the checklist rests on the test itself -- Article 6 *and*
+Annex III for high-risk -- rather than on whatever happened to rank well."""
+
 Update = dict[str, Any]
 """What a node returns: only the state fields it changed."""
 
@@ -91,6 +124,8 @@ class Deps:
     session: Session
     client: GroqClient
     embedder: Embedder
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    """Parallel searches share one database session, which is not thread-safe."""
 
 
 def _note(runtime: Runtime[Deps], step: str, detail: str = "") -> list[Progress]:
@@ -101,15 +136,15 @@ def _note(runtime: Runtime[Deps], step: str, detail: str = "") -> list[Progress]
 
 
 def _ask_small_model(runtime: Runtime[Deps], system: str, user: str, schema: dict):
-    """The cheap model, for routing steps. Short answers, but the model reasons first, and the
-    client refuses an allowance below MIN_OUTPUT_TOKENS."""
+    """The cheap model, for routing and review. Short answers, but the model reasons first,
+    and the client refuses an allowance below MIN_OUTPUT_TOKENS."""
     return runtime.context.client.structured(
         system=system, user=user, response_format=schema, model=settings.groq_small_model,
         max_completion_tokens=1024, reasoning_effort="low",
     )
 
 
-# ------------------------------------------------------------------------ nodes
+# ------------------------------------------------------------------------ understand
 
 
 def rewrite_followup(state: QueryState, runtime: Runtime[Deps]) -> Update:
@@ -141,23 +176,26 @@ def rewrite_followup(state: QueryState, runtime: Runtime[Deps]) -> Update:
 
 
 def analyse(state: QueryState, runtime: Runtime[Deps]) -> Update:
-    """Classify intent, expand the query, and pick up any provision the user named."""
+    """Classify the question and gather what its path needs, in one call."""
     progress = _note(runtime, "analysing", "classifying the question")
     completion = _ask_small_model(
         runtime, prompts.ANALYSIS_SYSTEM, state.question, QUERY_ANALYSIS_SCHEMA
     )
     data = completion.data
+    intent = _corrected_intent(data.get("intent", "lookup"), state.question)
     update: Update = {
         "progress": progress,
         "usage": completion.usage,
-        "intent": _corrected_intent(data.get("intent", "lookup"), state.question),
+        "intent": intent,
         "search_queries": [q for q in data.get("search_queries", []) if q.strip()],
         **{
             key: [a.strip() for a in data.get(key, []) if a.strip()]
             for key in ("referenced_articles", "referenced_annexes")
         },
+        "legal_test": data.get("legal_test") or "none",
+        "sides": [s.strip() for s in data.get("sides", []) if s.strip()],
     }
-    if update["intent"] == "greeting":
+    if intent == "greeting":
         reply = str(data.get("reply") or "").strip()
         update["abstain_reason"] = (
             f"{reply} {HELP_OFFER}" if 0 < len(reply) <= _MAX_GREETING_CHARS else HELP_OFFER
@@ -193,53 +231,132 @@ def _corrected_intent(intent: str, question: str) -> str:
     return intent
 
 
-def embed_query(state: QueryState, runtime: Runtime[Deps]) -> Update:
-    """Embed the question for the dense leg of retrieval."""
+# ------------------------------------------------------------------------ search
+
+
+_NAMED_ARTICLES = re.compile(r"\bArticles?\s+(\d+[a-z]?(?:\s*(?:,|and|or|to)\s*\d+[a-z]?)*)", re.I)
+"""Articles a follow-up names, "Articles 53 and 54" included: round one has the analyser's."""
+
+
+def plan(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Start a round: decide its question and its searches, one per side of a comparison."""
+    number = state.round + 1
+    if state.next_step:  # a follow-up the review asked for
+        focus, intent = state.next_step["question"], state.next_step["kind"]
+        sides = state.next_step["sides"]
+        named = [n for g in _NAMED_ARTICLES.findall(focus) for n in re.findall(r"\d+[a-z]?", g)]
+        tasks = [SearchTask(query=focus, label=f"for: {focus}", articles=named, round=number)]
+    else:
+        focus, intent, sides = state.question, state.intent, state.sides
+        tasks = [SearchTask(
+            query=focus,
+            search_queries=state.search_queries,
+            articles=state.referenced_articles,
+            annexes=state.referenced_annexes,
+            round=number,
+        )]
+        if intent == "applicability" and state.legal_test in LEGAL_TESTS:
+            # The test's own provisions, ranked on their own so nothing crowds them out:
+            # for a CV-screening tool, Annex III's employment point is the whole answer.
+            articles, annexes = LEGAL_TESTS[state.legal_test]
+            names = [f"Article {a}" for a in articles] + [f"Annex {a}" for a in annexes]
+            tasks.append(SearchTask(
+                query=focus, label=f"the legal test in {', '.join(names)}", articles=articles,
+                annexes=annexes, round=number, side=1, named_only=True,
+            ))
+    if intent == "comparison" and len(sides) > 1:
+        tasks = [
+            SearchTask(query=side, label=f"for: {side}", round=number, side=i)
+            for i, side in enumerate(sides[:3])
+        ]
     return {
-        "progress": _note(runtime, "retrieving", "searching the indexed regulation"),
-        "query_embedding": runtime.context.embedder.embed_query(state.question),
+        "round": number, "focus": focus, "focus_intent": intent, "tasks": tasks,
+        "next_step": None,
+        # A fresh draft for the new round.
+        "evidence": [], "raw_answer": None, "report": None, "rejected": [],
+        "repair_attempted": False, "shortened": False, "overran": False,
     }
 
 
-def retrieve_evidence(state: QueryState, runtime: Runtime[Deps]) -> Update:
-    """Run the three retrieval legs, at chunk granularity."""
-    return {"candidates": retrieve(
-        runtime.context.session,
-        query=state.question,
-        embedding=state.query_embedding,
-        search_queries=state.search_queries,
-        articles=state.referenced_articles,
-        annexes=state.referenced_annexes,
-    )}
+def embed_query(task: SearchTask, runtime: Runtime[Deps]) -> Update:
+    """Embed the search's query for the dense leg of retrieval."""
+    detail = f"searching {task.label}" if task.label else "searching the indexed regulation"
+    progress = _note(runtime, "retrieving", detail)
+    if task.named_only:  # a lookup by number needs no vector
+        return {"progress": progress}
+    return {
+        "progress": progress,
+        "query_embedding": runtime.context.embedder.embed_query(task.query),
+    }
 
 
-def rerank_evidence(state: QueryState, runtime: Runtime[Deps]) -> Update:
+def retrieve_evidence(task: SearchTask, runtime: Runtime[Deps]) -> Update:
+    """Run the three retrieval legs, at chunk granularity; or only the named provisions."""
+    with runtime.context.lock:
+        if task.named_only:
+            return {"candidates": structural_search(
+                runtime.context.session, task.articles, task.annexes, parts=[]
+            )}
+        return {"candidates": retrieve(
+            runtime.context.session,
+            query=task.query,
+            embedding=task.query_embedding,
+            search_queries=task.search_queries,
+            articles=task.articles,
+            annexes=task.annexes,
+        )}
+
+
+def rerank_evidence(task: SearchTask, runtime: Runtime[Deps]) -> Update:
     """Score the ~99-token chunks, before expansion: cheaper, and a truer measure."""
-    progress = _note(runtime, "reranking", f"scoring {len(state.candidates)} candidate passages")
-    result = rerank(state.question, state.candidates)
+    progress = _note(runtime, "reranking", f"scoring {len(task.candidates)} candidate passages")
+    result = rerank(task.query, task.candidates)
     return {
         "progress": progress,
         "usage": result.usage,
-        "best_rerank_score": result.best_score,
+        "best_score": result.best_score,
         "kept": result.kept,
     }
 
 
-def expand_evidence(state: QueryState, runtime: Runtime[Deps]) -> Update:
-    """Expand the kept chunks to whole provisions and fit them to the answer prompt."""
-    if not state.kept:
-        return {"evidence": []}
-    progress = _note(runtime, "expanding", f"reading {len(state.kept)} provisions in full")
-    session = runtime.context.session
+def expand_evidence(task: SearchTask, runtime: Runtime[Deps]) -> Update:
+    """Expand the kept chunks to whole provisions, and hand them back as this search's find."""
+    units: list[RetrievedUnit] = []
+    progress: list[Progress] = []
+    if task.kept:
+        progress = _note(runtime, "expanding", f"reading {len(task.kept)} provisions in full")
+        with runtime.context.lock:
+            units = expand_to_units(runtime.context.session, task.kept)
+    return {
+        "progress": progress,
+        "found": [Finding(task.round, task.side, units, task.best_score)],
+    }
+
+
+def collect(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Merge this round's searches into one evidence set that fits the answer prompt."""
+    found = sorted((f for f in state.found if f.round == state.round), key=lambda f: f.side)
+    budget = settings.evidence_token_budget
     # Authority orders the units *before* the budget is spent: in relevance order, a long
     # binding provision like Article 50 was promoted and then dropped for want of room.
-    units = fit_token_budget(
-        by_authority(expand_to_units(session, state.kept)), settings.evidence_token_budget
-    )
+    # Each side of a comparison spends its own share, so neither crowds the other out.
+    share = budget // max(1, len(found))
+    units = by_authority(list({  # one copy of a provision two searches both found
+        u.unit_id: u for f in found for u in fit_token_budget(by_authority(f.units), share)
+    }.values()))
+    session = runtime.context.session
     # Code units are read inside their commitment, with what is left of the same budget.
     spent = sum(estimate_tokens(u.text) for u in units)
-    units = with_structure(session, units, max(0, settings.evidence_token_budget - spent))
-    return {"progress": progress, "evidence": _fit_to_prompt_budget(label_units(units), state)}
+    units = with_structure(session, units, max(0, budget - spent))
+    if state.focus_intent == "overview" and units:
+        units = [units[0], *outline(session, units[0]), *units[1:]]
+    return {
+        "best_rerank_score": max((f.best_score for f in found), default=0.0),
+        "evidence": _fit_to_prompt_budget(label_units(units), state),
+    }
+
+
+# ------------------------------------------------------------------------ answer
 
 
 def generate(state: QueryState, runtime: Runtime[Deps]) -> Update:
@@ -251,11 +368,12 @@ def generate(state: QueryState, runtime: Runtime[Deps]) -> Update:
     progress = _note(runtime, "generating", "drafting an answer from the retrieved provisions")
     max_claims = settings.max_claims_retry if state.shortened else settings.max_claims
     system, user = _answer_prompts(state, state.evidence, max_claims, state.rejected or None)
+    assessment = state.focus_intent == "applicability"
     try:
         completion = runtime.context.client.structured(
             system=system,
             user=user,
-            response_format=ASSESSMENT_SCHEMA if state.intent == "applicability" else ANSWER_SCHEMA,
+            response_format=ASSESSMENT_SCHEMA if assessment else ANSWER_SCHEMA,
             model=settings.groq_model,
             # Evidence + output must fit the free tier's 8k tokens/minute.
             max_completion_tokens=settings.answer_max_tokens,
@@ -283,7 +401,7 @@ def shorten(state: QueryState, runtime: Runtime[Deps]) -> Update:
 def verify(state: QueryState, runtime: Runtime[Deps]) -> Update:
     """Check every quote against the unit text shown to the model as its evidence block."""
     data = state.raw_answer or {}
-    if state.intent == "applicability":
+    if state.focus_intent == "applicability":
         # Quotes per criterion rather than per claim; the grounding requirement is the same.
         claims = [
             {"text": _criterion_text(c), "supporting_quotes": c.get("supporting_quotes", [])}
@@ -309,10 +427,87 @@ def repair(state: QueryState, runtime: Runtime[Deps]) -> Update:
     }
 
 
+# ------------------------------------------------------------------------ review and finish
+
+
+def review(state: QueryState, runtime: Runtime[Deps]) -> Update:
+    """Keep this round's verified answer, then ask whether a part of the question is missing.
+
+    At most ``max_rounds`` rounds. The follow-up goes through the same search, drafting and
+    verification as the question itself, so it can only add verified claims.
+    """
+    this = Round(
+        state.focus, state.focus_intent, _outcome(state), state.report, state.evidence,
+        state.raw_answer,
+    )
+    update: Update = {"rounds": [this]}
+    # A checklist's open points are facts about the user's system, which no search supplies.
+    if (
+        this.outcome["verdict"] == "abstained" or state.round >= settings.max_rounds
+        or state.focus_intent == "applicability"
+    ):
+        return update
+    update["progress"] = _note(runtime, "reviewing", "checking the answer covers the question")
+    so_far = prompts.answer_so_far([*state.rounds, this])
+    try:
+        completion = _ask_small_model(
+            runtime, prompts.REVIEW_SYSTEM,
+            f"QUESTION\n{state.question}\n\nANSWER SO FAR\n\n{so_far}", REVIEW_SCHEMA,
+        )
+    except SchemaValidationFailed:
+        log.warning("Review was rejected; answering with what was verified")
+        return update
+    data = completion.data
+    update["usage"] = completion.usage
+    question = str(data.get("question") or "").strip()
+    if data.get("complete") is False and data.get("kind") in ("lookup", "comparison") and (
+        question and question != state.focus
+    ):
+        sides = [s.strip() for s in data.get("sides", []) if s.strip()]
+        update["next_step"] = {"kind": data["kind"], "question": question, "sides": sides}
+        update["progress"] += _note(runtime, "extending", question)
+    return update
+
+
 def finalise(state: QueryState, runtime: Runtime[Deps]) -> Update:
-    """Apply the coverage gate and assemble what the user actually sees."""
-    update = _outcome(state)
-    return update | {"progress": _note(runtime, "done", update["verdict"])}
+    """Assemble the rounds into what the user sees: one answer, every claim verified."""
+    first, *more = state.rounds
+    kept = [first]
+    if first.outcome["verdict"] != "abstained":
+        kept += [r for r in more if r.outcome["verdict"] != "abstained"]
+    reports = [r.report for r in kept if r.report is not None]
+    update: Update = dict(first.outcome) | {
+        "claims": [
+            claim for r in kept if r.intent != "applicability" and r.report
+            for claim in r.report.claims
+        ],
+        "report": first.report if len(kept) == 1 else _merged(reports),
+        "evidence": [u for r in kept for u in r.evidence],
+        "raw_answer": (
+            first.raw_answer if len(state.rounds) == 1
+            else {"rounds": [r.raw_answer for r in state.rounds]}
+        ),
+    }
+    progress: list[Progress] = []
+    if len(kept) > 1:
+        if any(r.outcome["verdict"] == "partial" for r in kept):
+            update["verdict"] = "partial"
+        progress = _note(runtime, "wrapping_up", "bringing the parts into one answer")
+        try:
+            completion = _ask_small_model(
+                runtime, prompts.WRAPUP_SYSTEM,
+                f"QUESTION\n{state.question}\n\nTHE PARTS\n\n{prompts.answer_so_far(kept)}",
+                WRAPUP_SCHEMA,
+            )
+        except SchemaValidationFailed:
+            log.warning("Wrap-up was rejected; keeping the first part's summary")
+        else:
+            update["usage"] = completion.usage
+            update["summary"] = str(completion.data.get("summary") or "").strip() or first.outcome[
+                "summary"
+            ]
+            update["unanswered_aspects"] = list(completion.data.get("unanswered_aspects") or [])
+    return update | {"progress": progress + _note(runtime, "done", update["verdict"])}
 
 
 def abstain(state: QueryState, runtime: Runtime[Deps]) -> Update:
@@ -332,12 +527,27 @@ def abstain(state: QueryState, runtime: Runtime[Deps]) -> Update:
 # ------------------------------------------------------------------------ the graph
 
 
+def _after_collect(state: QueryState) -> str:
+    """Gate before generation: is there anything worth grounding an answer in? A follow-up
+    round that finds nothing is dropped, not the answer it follows."""
+    if state.evidence and state.best_rerank_score >= settings.rerank_min_score:
+        return "generate"
+    return "finalise" if state.rounds else "abstain"
+
+
 def build_graph():
-    """Wire the nodes and decisions into a compiled graph."""
+    """Wire the nodes and decisions into a compiled graph, with search as a subgraph."""
+    research = StateGraph(SearchTask, context_schema=Deps, output_schema=Research)
+    research.add_sequence([embed_query, retrieve_evidence, rerank_evidence, expand_evidence])
+    research.add_edge(START, "embed_query")
+
     graph = StateGraph(QueryState, context_schema=Deps)
-    for node in (rewrite_followup, analyse, generate, shorten, verify, repair, finalise, abstain):
+    for node in (
+        rewrite_followup, analyse, plan, collect, generate, shorten, verify, repair, review,
+        finalise, abstain,
+    ):
         graph.add_node(node)
-    graph.add_sequence([embed_query, retrieve_evidence, rerank_evidence, expand_evidence])
+    graph.add_node("research", research.compile())
 
     def route(source: str, decide: Callable[[QueryState], bool], yes: str, no: str) -> None:
         graph.add_conditional_edges(source, lambda s: yes if decide(s) else no, [yes, no])
@@ -345,12 +555,13 @@ def build_graph():
     # A first question costs no rewrite.
     route(START, lambda s: bool(s.history), "rewrite_followup", "analyse")
     graph.add_edge("rewrite_followup", "analyse")
-    route("analyse", lambda s: s.intent in _NO_SEARCH, "abstain", "embed_query")
-    route(
-        "expand_evidence",
-        lambda s: bool(s.evidence) and s.best_rerank_score >= settings.rerank_min_score,
-        "generate", "abstain",
+    route("analyse", lambda s: s.intent in _NO_SEARCH, "abstain", "plan")
+    # One search per task, in parallel; collect runs once they have all finished.
+    graph.add_conditional_edges(
+        "plan", lambda s: [Send("research", task) for task in s.tasks], ["research"]
     )
+    graph.add_edge("research", "collect")
+    graph.add_conditional_edges("collect", _after_collect, ["generate", "finalise", "abstain"])
     # One shorter retry; a second overrun is verified as empty and abstains.
     route("generate", lambda s: s.overran and not s.shortened, "shorten", "verify")
     graph.add_edge("shorten", "generate")
@@ -359,9 +570,10 @@ def build_graph():
         "verify",
         lambda s: not s.repair_attempted and bool(s.report.rejected)
         and s.report.coverage < settings.coverage_answer_threshold,
-        "repair", "finalise",
+        "repair", "review",
     )
     graph.add_edge("repair", "generate")
+    route("review", lambda s: s.next_step is not None, "plan", "finalise")
     graph.add_edge("finalise", END)
     graph.add_edge("abstain", END)
     return graph.compile()
@@ -382,13 +594,18 @@ def run_pipeline(
     started = time.perf_counter()
     initial = QueryState(question=question, history=list(history[-settings.followup_turns :]))
     final: dict[str, Any] = {}
-    for mode, chunk in GRAPH.stream(
-        initial, context=Deps(session, client, embedder), stream_mode=["custom", "values"]
+    for namespace, mode, chunk in GRAPH.stream(
+        initial,
+        context=Deps(session, client, embedder),
+        stream_mode=["custom", "values"],
+        subgraphs=True,  # progress from inside the searches too
+        config={"recursion_limit": 60},  # two rounds, each with its retries
     ):
-        if mode == "values":
+        if mode == "custom":
+            if on_progress is not None:
+                on_progress(chunk)
+        elif not namespace:
             final = chunk
-        elif on_progress is not None:
-            on_progress(chunk)
     state = QueryState(**final)
     state.latency_ms = int((time.perf_counter() - started) * 1000)
     return state
@@ -403,15 +620,17 @@ def _answer_prompts(
     max_claims: int,
     rejected: list[str] | None = None,
 ) -> tuple[str, str]:
-    """System and user prompt for the answer call, or the criteria assessment's."""
-    assessment = state.intent == "applicability"
+    """System and user prompt for this round's answer call, or the criteria assessment's."""
+    assessment = state.focus_intent == "applicability"
     system = (
         prompts.ASSESSMENT_SYSTEM if assessment
         else prompts.ANSWER_SYSTEM.format(max_claims=max_claims)
     )
     user = prompts.user_prompt(
-        state.question, prompts.format_evidence(evidence), rejected, assessment=assessment
+        state.focus, prompts.format_evidence(evidence), rejected, assessment=assessment
     )
+    if state.round > 1:
+        user += prompts.PART_NOTE
     return system, user
 
 
@@ -465,14 +684,26 @@ def _criterion_text(criterion: dict) -> str:
     return f"{criterion.get('criterion', '')} - {criterion.get('explanation', '')}".strip(" -")
 
 
+def _merged(reports: list[VerificationReport]) -> VerificationReport:
+    """One report over several rounds, for the answer's totals."""
+    return VerificationReport(
+        claims=[c for r in reports for c in r.claims],
+        dropped_claims=[c for r in reports for c in r.dropped_claims],
+        rejected=[q for r in reports for q in r.rejected],
+        quotes_total=sum(r.quotes_total for r in reports),
+        quotes_exact=sum(r.quotes_exact for r in reports),
+        quotes_elided=sum(r.quotes_elided for r in reports),
+    )
+
+
 def _outcome(state: QueryState) -> Update:
-    """The verdict and what is shown with it."""
+    """This round's verdict and what is shown with it."""
     data, report = state.raw_answer or {}, state.report
     if report is None or not report.claims:
         reason = OVERRAN_REASON if state.overran else data.get("abstain_reason")
         return {"verdict": "abstained", "abstain_reason": reason or UNSUPPORTED_REASON}
     # A model that declared itself unable to answer is believed, even if some quote verified.
-    if state.intent != "applicability" and data.get("answerable") is False:
+    if state.focus_intent != "applicability" and data.get("answerable") is False:
         reason = data.get("abstain_reason") or NO_EVIDENCE_REASON
         return {"verdict": "abstained", "abstain_reason": reason}
     verdict = decide_verdict(report)
@@ -485,7 +716,7 @@ def _outcome(state: QueryState) -> Update:
         "unanswered_aspects": list(data.get("unanswered_aspects") or []),
         "follow_up_questions": list(data.get("follow_up_questions") or []),
     }
-    if state.intent == "applicability":
+    if state.focus_intent == "applicability":
         # Only criteria whose quotes survived verification.
         surviving = {c.text: c for c in report.claims}
         update["criteria"] = [
